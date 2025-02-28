@@ -68,6 +68,7 @@ const Leave = require('./models/Leave');
 const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
+const { setupGuild } = require('./utils/guildSetup');
 
 // ============= الدوال المساعدة الأساسية =============
 
@@ -128,42 +129,47 @@ async function handleCreateTicket(interaction) {
 }
 
 // دالة لإنشاء قناة التذكرة
-async function createTicketChannel(interaction, ticketType) {
-    const guild = interaction.guild;
-    const member = interaction.member;
-
-    // الحصول على عدد التذاكر الحالية
-    const ticketCount = await Ticket.countDocuments({ guildId: guild.id });
-    const ticketNumber = String(ticketCount + 1).padStart(4, '0'); // تنسيق الرقم
-
-    // إنشاء اسم للتذكرة
-    const ticketName = `تذكرة-${ticketNumber}`;
-
+async function createTicketChannel(interaction, ticketContent) {
+    const { guild, member } = interaction;
+    
     try {
-        // الحصول على الفئة (category) من القناة الأصلية
-        const parentChannel = interaction.channel.parent; // الحصول على الفئة من القناة التي تم استخدامها
+        // الحصول على رقم التذكرة التالي
+        const ticketCount = await Ticket.countDocuments({ guildId: guild.id }) + 1;
+        const ticketNumber = String(ticketCount).padStart(4, '0');
+        const ticketName = `ticket-${ticketNumber}`;
+        
+        // إعداد خيارات القناة
         const channelOptions = {
             name: ticketName,
-            type: 0, // نوع القناة النصية
+            type: ChannelType.GuildText,
             permissionOverwrites: [
                 {
                     id: guild.id,
-                    deny: ['ViewChannel'],
+                    deny: [PermissionFlagsBits.ViewChannel]
                 },
                 {
                     id: member.id,
-                    allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'],
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory
+                    ]
                 },
                 {
-                    id: interaction.client.user.id,
-                    allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'],
+                    id: guild.client.user.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory,
+                        PermissionFlagsBits.ManageChannels
+                    ]
                 },
             ],
         };
 
         // إنشاء القناة
-        const ticketChannel = await guild.channels.create(ticketName, channelOptions);
-    
+        const ticketChannel = await guild.channels.create(channelOptions);
+        
         // حفظ التذكرة في قاعدة البيانات
         const ticket = new Ticket({
             ticketId: `TICKET-${ticketNumber}`,
@@ -171,33 +177,42 @@ async function createTicketChannel(interaction, ticketType) {
             guildId: guild.id,
             channelId: ticketChannel.id,
             status: 'open',
-            createdAt: new Date(),
+            content: ticketContent,
+            createdAt: new Date()
         });
+        
         await ticket.save();
-
-        // إرسال الرسالة الأولى في التذكرة
-        const embed = new EmbedBuilder()
-            .setTitle(`تذكرة ${ticketType}`)
-            .setDescription(`مرحباً ${member}! سيقوم فريق الدعم بالرد عليك قريباً.\nاضغط على زر إغلاق التذكرة لتغلقها (للمسؤولين فقط)`)
-            .setColor(0x00ff00)
-            .setTimestamp();
-
+        
+        // إنشاء أزرار التحكم في التذكرة
         const row = new ActionRowBuilder()
             .addComponents(
                 new ButtonBuilder()
-                    .setCustomId('close_ticket')
+                    .setCustomId(`close_ticket:${ticketChannel.id}`)
                     .setLabel('إغلاق التذكرة')
-                    .setStyle(ButtonStyle.Danger)
+                    .setStyle(ButtonStyle.Danger),
             );
-
-        await channel.send({
-            embeds: [embed],
+            
+        // إرسال رسالة ترحيبية في قناة التذكرة
+        await ticketChannel.send({
+            content: `<@${member.id}> مرحبًا بك في تذكرتك!`,
+            embeds: [
+                new EmbedBuilder()
+                    .setColor('#0099ff')
+                    .setTitle(`تذكرة #${ticketNumber}`)
+                    .setDescription('شكرًا لإنشاء تذكرة. سيقوم فريق الدعم بالرد عليك في أقرب وقت ممكن.')
+                    .addFields({ name: 'المحتوى', value: ticketContent || 'لا يوجد محتوى' })
+                    .setTimestamp()
+            ],
             components: [row]
         });
-
+        
+        // تسجيل إنشاء التذكرة
+        logger.info(`تم إنشاء تذكرة جديدة بواسطة ${member.user.tag} في السيرفر ${guild.name}`);
+        
         return ticketChannel;
     } catch (error) {
-        logger.error('Error in OpenTicket:', error);
+        logger.error("Error in OpenTicket:", error);
+        throw error;
     }
 }
 
@@ -2264,7 +2279,7 @@ async function generateWeeklyAttendanceLog(guild) {
             dailyReports.push(
                 `**${dayName}** (${moment(date).format('DD/MM')})\n` +
                 `👥 عدد الحاضرين: ${stats.uniqueUsers.size}\n` +
-                `⏰ إجمالي الوقت: ${timeText.join(' ') || 'لا يوجد'}\n` +
+                `⏱️ إجمالي وقت العمل: ${timeText.join(' ') || 'لا يوجد'}\n` +
                 `🔄 عدد الجلسات: ${stats.sessions}\n`
             );
         }

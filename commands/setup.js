@@ -72,16 +72,22 @@ module.exports = {
                         .setRequired(true))),
 
     async execute(interaction) {
-        if (!interaction.guild.members.me.permissions.has(['ManageChannels', 'ManageRoles'])) {
-            return interaction.reply({
-                content: 'البوت يحتاج إلى صلاحيات إدارة القنوات والأدوار!',
-                ephemeral: true
-            });
-        }
-
         const subcommand = interaction.options.getSubcommand();
-
+        
         try {
+            // التحقق من صلاحيات المستخدم
+            if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+                await interaction.reply({
+                    content: 'يجب أن تكون مسؤولاً لاستخدام هذا الأمر.',
+                    ephemeral: true
+                });
+                return;
+            }
+            
+            // إرسال رسالة مؤقتة للإشارة إلى أن الإعداد قيد التقدم
+            await interaction.deferReply({ ephemeral: true });
+            
+            // استدعاء دالة إعداد السيرفر
             switch (subcommand) {
                 case 'all':
                     await setupAll(interaction);
@@ -99,12 +105,25 @@ module.exports = {
                     await setupAttendance(interaction);
                     break;
             }
-        } catch (error) {
-            console.error(`Error in setup command (${subcommand}):`, error);
-            await interaction.reply({
-                content: 'حدث خطأ أثناء إعداد النظام.',
+            
+            // إكمال الرد بعد الانتهاء من الإعداد
+            await interaction.editReply({
+                content: `✅ تم إعداد ${subcommand === 'all' ? 'جميع الأنظمة' : `نظام ${subcommand}`} بنجاح!`,
                 ephemeral: true
             });
+            
+        } catch (error) {
+            console.error(`Error in setup command (${subcommand}):`, error);
+            
+            // استخدام editReply بدلاً من reply لتجنب الخطأ
+            try {
+                await interaction.editReply({
+                    content: 'حدث خطأ أثناء إعداد النظام.',
+                    ephemeral: true
+                });
+            } catch (replyError) {
+                console.error('Error sending error response:', replyError);
+            }
         }
     }
 };
