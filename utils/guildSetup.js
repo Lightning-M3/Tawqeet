@@ -6,8 +6,9 @@ const { checkRequiredChannels, checkBotPermissions } = require('./helpers');
 /**
  * دالة إعداد السيرفر
  * تقوم بإنشاء القنوات والأدوار المطلوبة وتكوين الإعدادات الأساسية
- * @param {Guild} guild كائن السيرفر
+ * @param {Object} guild كائن السيرفر من discord.js
  * @returns {Promise<void>}
+ * @throws {Error} في حالة فشل عملية الإعداد
  */
 async function setupGuild(guild) {
     logger.info(`بدء إعداد السيرفر ${guild.name}`);
@@ -80,4 +81,5 @@ async function setupGuild(guild) {
     }
 }
 
+// تصدير الدالة بشكل واضح
 module.exports = { setupGuild };

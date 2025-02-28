@@ -68,51 +68,7 @@ const Leave = require('./models/Leave');
 const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
-
-// استيراد دالة setupGuild مباشرة
-let setupGuild;
-try {
-    const guildSetupModule = require('./utils/guildSetup');
-    setupGuild = guildSetupModule.setupGuild;
-    
-    // تعريف بديل للدالة في حال فشل الاستيراد
-    if (!setupGuild) {
-        logger.warn('تم استيراد ملف guildSetup.js ولكن دالة setupGuild غير موجودة. استخدام الدالة البديلة.');
-        setupGuild = async function(guild) {
-            logger.info(`إعداد السيرفر ${guild.name} باستخدام الدالة البديلة`);
-            // التأكد من وجود إعدادات السيرفر في قاعدة البيانات
-            let guildConfig = await GuildSettings.findOne({ guildId: guild.id });
-            if (!guildConfig) {
-                guildConfig = new GuildSettings({
-                    guildId: guild.id,
-                    name: guild.name,
-                    setupComplete: true,
-                    createdAt: new Date()
-                });
-                await guildConfig.save();
-                logger.info(`تم إنشاء إعدادات جديدة للسيرفر ${guild.name}`);
-            }
-        };
-    }
-} catch (error) {
-    logger.error('خطأ في استيراد ملف guildSetup.js:', error);
-    // تعريف دالة بديلة في حالة فشل الاستيراد
-    setupGuild = async function(guild) {
-        logger.info(`إعداد السيرفر ${guild.name} باستخدام الدالة البديلة`);
-        // التأكد من وجود إعدادات السيرفر في قاعدة البيانات
-        let guildConfig = await GuildSettings.findOne({ guildId: guild.id });
-        if (!guildConfig) {
-            guildConfig = new GuildSettings({
-                guildId: guild.id,
-                name: guild.name,
-                setupComplete: true,
-                createdAt: new Date()
-            });
-            await guildConfig.save();
-            logger.info(`تم إنشاء إعدادات جديدة للسيرفر ${guild.name}`);
-        }
-    };
-}
+const { setupGuild } = require('./utils/guildSetup'); // استيراد دالة setupGuild
 
 // ============= الدوال المساعدة الأساسية =============
 
@@ -211,15 +167,8 @@ async function createTicketChannel(interaction, ticketContent) {
             ],
         };
 
-        // إنشاء القناة - استخدام الطريقة الصحيحة للإصدار الحالي من discord.js
-        logger.debug('إنشاء قناة التذكرة باستخدام الخيارات:', channelOptions);
+        // إنشاء القناة
         const ticketChannel = await guild.channels.create(channelOptions);
-        
-        if (!ticketChannel) {
-            throw new Error('فشل في إنشاء قناة التذكرة - لم يتم إرجاع قناة');
-        }
-        
-        logger.info(`تم إنشاء قناة التذكرة ${ticketChannel.name} (${ticketChannel.id})`);
         
         // حفظ التذكرة في قاعدة البيانات
         const ticket = new Ticket({
@@ -233,7 +182,6 @@ async function createTicketChannel(interaction, ticketContent) {
         });
         
         await ticket.save();
-        logger.info(`تم حفظ التذكرة في قاعدة البيانات: ${ticket.ticketId}`);
         
         // إنشاء أزرار التحكم في التذكرة
         const row = new ActionRowBuilder()
@@ -548,7 +496,7 @@ client.on(Events.GuildCreate, async guild => {
         }
 
         logger.info(`بدء إعداد السيرفر ${guild.name}`);
-        await setupGuild(guild);
+        await setupGuild(guild); // استخدام دالة setupGuild
         
     } catch (error) {
         logger.error(`خطأ أثناء إعداد السيرفر ${guild.name}:`, error);
@@ -557,7 +505,7 @@ client.on(Events.GuildCreate, async guild => {
             try {
                 if (checkRateLimit(guild.id, 'setup_retry', 1, 60000)) {
                     logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
-                    await setupGuild(guild);
+                    await setupGuild(guild); // استخدام دالة setupGuild
                 }
             } catch (retryError) {
                 logger.error(`فشلت محاولة إعادة إعداد السيرفر ${guild.name}:`, retryError);
@@ -1008,7 +956,7 @@ function formatSessionDuration(checkIn, checkOut) {
     }
 
     // تحويل إلى دقائق مع التقريب
-    let minutes = Math.round(totalSeconds / 60);
+    let minutes = Math.floor(totalSeconds / 60);
     
     // تنسيق النص
     return `${minutes} ${minutes === 1 ? 'دقيقة' : 'دقائق'}`;
@@ -1664,7 +1612,7 @@ client.on(Events.GuildCreate, async (guild) => {
         }
 
         logger.info(`Starting setup for ${guild.name}`);
-        await setupGuild(guild);
+        await setupGuild(guild); // استخدام دالة setupGuild
         
     } catch (error) {
         logger.error(`Error setting up guild ${guild.name}:`, error);
@@ -1673,7 +1621,7 @@ client.on(Events.GuildCreate, async (guild) => {
             try {
                 if (checkRateLimit(guild.id, 'setup_retry', 1, 60000)) {
                     logger.info(`Retrying setup for ${guild.name}`);
-                    await setupGuild(guild);
+                    await setupGuild(guild); // استخدام دالة setupGuild
                 }
             } catch (retryError) {
                 logger.error(`Failed to retry setup for ${guild.name}:`, retryError);
@@ -1689,7 +1637,7 @@ client.on(Events.GuildCreate, guild => {
             const guildConfig = await GuildSettings.findOne({ guildId: guild.id });
             if (!guildConfig || !guildConfig.setupComplete) {
                 logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
-                await setupGuild(guild);
+                await setupGuild(guild); // استخدام دالة setupGuild
             }
         } catch (error) {
             logger.error(`فشل في إعادة إعداد السيرفر ${guild.name}:`, error);
