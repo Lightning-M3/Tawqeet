@@ -1467,8 +1467,8 @@ async function createDiscordChannel(guild, options) {
 // ============= تحسينات الأمان =============
 
 // حماية من التكرار المفرط للطلبات
-const rateLimits = require('express-rate-limit');
-const limiter = rateLimits({
+const expressRateLimit = require('express-rate-limit');
+const limiter = expressRateLimit({
     windowMs: 15 * 60 * 1000, // 15 دقيقة
     max: 100, // حد أقصى 100 طلب
     message: 'تم تجاوز الحد المسموح من الطلبات. الرجاء المحاولة لاحقاً.',
