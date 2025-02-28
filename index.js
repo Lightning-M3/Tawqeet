@@ -228,8 +228,8 @@ client.once(Events.ClientReady, async () => {
         // تنظيف الذاكرة المؤقتة كل ساعة
         setInterval(cleanupCache, 3600000);
         
-        // تحديث حالة البوت كل 5 دقائق
-        setInterval(() => updateBotPresence(client), 300000);
+        // تحديث حالة البوت كل ساعة
+        setInterval(() => updateBotPresence(client), 3600000);
 
     } catch (error) {
         logger.error('Error in bot initialization:', {
