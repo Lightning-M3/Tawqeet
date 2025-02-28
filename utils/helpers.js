@@ -146,11 +146,28 @@ async function getErrorChannel(guild) {
     }
 }
 
+/**
+ * دالة مساعدة لتنسيق صيغ الوقت بالعربية (مفرد، مثنى، جمع)
+ * @param {number} number الرقم الذي سيتم تنسيقه
+ * @param {string} singular صيغة المفرد (ساعة/دقيقة)
+ * @param {string} dual صيغة المثنى (ساعتان/دقيقتان)
+ * @param {string} plural صيغة الجمع (ساعات/دقائق)
+ * @returns {string} النص المنسق بالعربية
+ */
+function formatArabicTime(number, singular, dual, plural) {
+    if (number === 0) return '';
+    if (number === 1) return `${number} ${singular}`;
+    if (number === 2) return `${dual}`;
+    if (number >= 3 && number <= 10) return `${number} ${plural}`;
+    return `${number} ${singular}`;
+}
+
 module.exports = {
   checkRequiredChannels,
   checkBotPermissions,
   retryOperation,
   handleError,
   setupErrorChannel,
-  getErrorChannel
+  getErrorChannel,
+  formatArabicTime
 }; 

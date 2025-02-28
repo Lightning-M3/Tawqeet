@@ -22,6 +22,12 @@ const mongoose = require('mongoose');
 const cron = require('node-cron');
 const NodeCache = require('node-cache');
 const moment = require('moment-timezone');
+const { 
+    checkRequiredChannels, 
+    checkBotPermissions, 
+    retryOperation,
+    formatArabicTime
+} = require('./utils/helpers');
 require('dotenv').config();
 
 // ============= دوال مساعدة للتعامل مع التوقيت =============
@@ -260,11 +266,7 @@ const attendanceLocks = new Map();
 
 // ============= استيراد الملفات المحلية =============
 const { setupDailyReset, forceCheckOutAll, sendDailyReport } = require('./cronJobs/dailyReset');
-const { 
-    checkRequiredChannels, 
-    checkBotPermissions, 
-    handleError 
-} = require('./utils/helpers');
+const { handleError } = require('./utils/helpers'); // استيراد دالة handleError بشكل صحيح
 
 // معالجة الأخطاء غير المتوقعة
 process.on('uncaughtException', (error) => {
@@ -473,157 +475,374 @@ client.on('interactionCreate', async (interaction) => {
 
 // ============= معالجة الأحداث والتفاعلات =============
 
-// معالجة حدث انضمام البوت لسيرفر جديد
-client.on(Events.GuildCreate, async guild => {
+client.on(Events.GuildCreate, async (guild) => {
     try {
         // التحقق من Rate Limit لإعداد السيرفر
         const setupLimitKey = `guild_setup:${guild.id}`;
         if (!checkRateLimit(guild.id, 'setup', 1, 60000)) {
-            logger.warn(`تم تجاهل محاولة إعداد السيرفر ${guild.name} بسبب التكرار السريع`);
+            logger.warn(`Setup was ignored for ${guild.name} because of rate limit`);
             return;
         }
 
-        logger.info(`تم إضافة البوت إلى سيرفر جديد: ${guild.name}`);
+        logger.info(`Bot added to new server: ${guild.name}`);
         
         // التحقق من وجود إعدادات سابقة
         const existingSettings = await GuildSettings.findOne({ guildId: guild.id });
         if (existingSettings && existingSettings.setupComplete) {
-            logger.info(`السيرفر ${guild.name} تم إعداده مسبقاً`);
+            logger.info(`${guild.name} has already been set up`);
             return;
         }
 
-        logger.info(`بدء إعداد السيرفر ${guild.name}`);
-        await setupGuild(guild); // استخدام دالة setupGuild
+        logger.info(`Starting setup for ${guild.name}`);
+        await setupGuild(guild, { forceReset: true, cleanExisting: false }); // استخدام دالة setupGuild مع خيارات إعادة الإعداد
         
     } catch (error) {
-        logger.error(`خطأ أثناء إعداد السيرفر ${guild.name}:`, error);
+        logger.error(`Error setting up guild ${guild.name}:`, error);
         // محاولة إعادة الإعداد مرة واحدة بعد 5 ثواني في حالة الفشل
         setTimeout(async () => {
             try {
                 if (checkRateLimit(guild.id, 'setup_retry', 1, 60000)) {
-                    logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
-                    await setupGuild(guild); // استخدام دالة setupGuild
+                    logger.info(`Retrying setup for ${guild.name}`);
+                    await setupGuild(guild, { forceReset: true, cleanExisting: true }); // استخدام دالة setupGuild مع خيارات إعادة الإعداد
                 }
             } catch (retryError) {
-                logger.error(`فشلت محاولة إعادة إعداد السيرفر ${guild.name}:`, retryError);
+                logger.error(`Failed to retry setup for ${guild.name}:`, retryError);
             }
         }, 5000);
     }
 });
 
 // معالجة حدث مغادرة البوت من سيرفر
-client.on(Events.GuildDelete, async guild => {
-    console.log(`Bot removed from server: ${guild.name}`);
-    
+client.on(Events.GuildDelete, async (guild) => {
     try {
-        // إرسال رسالة خاصة لصاحب البوت
-        const botOwner = await client.users.fetch('743432232529559684');
-        await botOwner.send(`❌ Bot removed from server: ${guild.name}`);
-
-        await retryOperation(async () => {
-            const Attendance = require('./models/Attendance');
-            await Attendance.deleteMany({ guildId: guild.id });
-
-            const Ticket = require('./models/Ticket');
-            await Ticket.deleteMany({ guildId: guild.id });
-
-            console.log(`Successfully deleted all data for server ${guild.name}`);
-        }, 5);
-
-    } catch (error) {
-        console.error(`Error cleaning up after guild delete for ${guild.name}:`, error);
+        logger.info(`Bot removed from server: ${guild.name} (ID: ${guild.id})`);
         
+        // إرسال إشعار إلى صاحب البوت (اختياري)
         try {
-            const Attendance = require('./models/Attendance');
-            await Attendance.deleteMany({ guildId: guild.id })
-                .catch(err => console.error('Error deleting attendance records:', err));
-
-            const Ticket = require('./models/Ticket');
-            await Ticket.deleteMany({ guildId: guild.id })
-                .catch(err => console.error('Error deleting tickets:', err));
-
-        } catch (secondError) {
-            console.error('Final error in cleanup:', secondError);
+            const botOwner = await client.users.fetch(process.env.BOT_OWNER_ID || '743432232529559684');
+            await botOwner.send(`❌ البوت تمت إزالته من سيرفر: ${guild.name} (ID: ${guild.id})`);
+        } catch (ownerMsgError) {
+            logger.error('Failed to notify bot owner:', ownerMsgError);
         }
+
+        // حذف بيانات السيرفر من قاعدة البيانات
+        const models = [
+            { name: 'GuildSettings', model: GuildSettings },
+            { name: 'Attendance', model: require('./models/Attendance') },
+            { name: 'Ticket', model: require('./models/Ticket') }
+            // يمكن إضافة مزيد من الموديلات هنا حسب الحاجة
+        ];
+
+        for (const { name, model } of models) {
+            try {
+                const result = await model.deleteMany({ guildId: guild.id });
+                logger.info(`Deleted ${result.deletedCount} ${name} records for guild ${guild.id}`);
+            } catch (deleteError) {
+                logger.error(`Error deleting ${name} records:`, deleteError);
+            }
+        }
+
+        logger.info(`Successfully cleaned up all data for server ${guild.name}`);
+    } catch (error) {
+        logger.error(`Error in GuildDelete event for ${guild?.name || 'unknown guild'}:`, error);
     }
 });
 
-// معالجة حدث تحديث السيرفر
-const { updateBotPresence } = require('./utils/botPresence.js');
+// معالجة حدث تحديث إعدادات السيرفر
 client.on(Events.GuildUpdate, async (oldGuild, newGuild) => {
     try {
-        // تحديث إعدادات السيرفر في قاعدة البيانات
-        await retryOperation(async () => {
-            const settings = await GuildSettings.findOneAndUpdate(
-                { guildId: newGuild.id },
-                {
-                    $set: {
-                        name: newGuild.name,
-                        icon: newGuild.icon,
-                        memberCount: newGuild.memberCount,
-                        updatedAt: new Date()
-                    }
-                },
-                { upsert: true, new: true }
-            );
+        logger.info(`Guild updated: ${newGuild.name} (ID: ${newGuild.id})`);
+        
+        // تحديث معلومات السيرفر في قاعدة البيانات
+        const guildSettings = await GuildSettings.findOne({ guildId: newGuild.id });
+        
+        if (guildSettings) {
+            guildSettings.name = newGuild.name;
+            guildSettings.icon = newGuild.iconURL();
+            guildSettings.memberCount = newGuild.memberCount;
+            guildSettings.updatedAt = new Date();
             
-            logger.info('تم تحديث إعدادات السيرفر', {
+            await guildSettings.save();
+            
+            logger.info(`Updated guild settings for ${newGuild.name}`, {
                 guildId: newGuild.id,
-                guildName: newGuild.name,
-                memberCount: newGuild.memberCount
+                updatedFields: ['name', 'icon', 'memberCount', 'updatedAt']
             });
-            
-            // تحديث حالة البوت لعكس التغييرات
-            await updateBotPresence(client);
-        });
+        }
+        
+        // التحقق من القنوات والأدوار المهمة
+        await checkCriticalChannelsAndRoles(newGuild);
+        
     } catch (error) {
-        logger.error('خطأ في تحديث إعدادات السيرفر:', {
-            guildId: newGuild.id,
-            error: error.message,
-            stack: error.stack
-        });
+        logger.error(`Error in GuildUpdate event for ${newGuild?.name || 'unknown guild'}:`, error);
     }
 });
 
-// معالجة حدث إضافة عضو جديد
-client.on(Events.GuildMemberAdd, async member => {
+// معالجة حدث حذف القنوات
+client.on(Events.ChannelDelete, async (channel) => {
     try {
-        const welcomeChannel = member.guild.channels.cache.find(ch => ch.name === '👋〡・الترحيب');
-        if (!welcomeChannel) return;
-
-        // إنشاء رسالة الترحيب
-        await welcomeChannel.send({
-            embeds: [{
-                title: '👋 عضو جديد!',
-                description: `مرحباً ${member} في ${member.guild.name}!`,
-                fields: [
-                    {
-                        name: '🎉 أنت العضو رقم',
-                        value: `${member.guild.memberCount}`
-                    },
-                    {
-                        name: '📅 تاريخ الانضمام',
-                        value: member.joinedAt.toLocaleDateString('en-GB', {
-                            day: '2-digit',
-                            month: '2-digit',
-                            year: 'numeric'
-                        })
-                    }
-                ],
-                color: 0x00ff00,
-                thumbnail: {
-                    url: member.user.displayAvatarURL({ dynamic: true })
-                },
-                timestamp: new Date(),
-                footer: {
-                    text: `ID: ${member.user.id}`
+        // التحقق فقط من قنوات السيرفر
+        if (!channel.guild) return;
+        
+        const guild = channel.guild;
+        const channelName = channel.name;
+        
+        // قائمة أسماء القنوات المهمة للبوت
+        const criticalChannels = ['سجل-التذاكر', 'سجل-الحضور', 'طلب-تذكرة', 'تسجيل-الحضور'];
+        
+        if (criticalChannels.includes(channelName)) {
+            logger.warn(`Critical channel deleted: ${channelName} in guild ${guild.name}`);
+            
+            // تحديث إعدادات السيرفر في قاعدة البيانات
+            const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+            
+            if (guildSettings) {
+                // تحديث الإعدادات بناءً على القناة المحذوفة
+                switch (channelName) {
+                    case 'سجل-التذاكر':
+                        if (guildSettings.features.tickets.logChannelId === channel.id) {
+                            guildSettings.features.tickets.logChannelId = null;
+                        }
+                        break;
+                    case 'سجل-الحضور':
+                        if (guildSettings.logsChannelId === channel.id) {
+                            guildSettings.logsChannelId = null;
+                        }
+                        break;
+                    case 'طلب-تذكرة':
+                        if (guildSettings.features.tickets.channelId === channel.id) {
+                            guildSettings.features.tickets.channelId = null;
+                        }
+                        break;
+                    case 'تسجيل-الحضور':
+                        if (guildSettings.features.attendance?.channelId === channel.id) {
+                            guildSettings.features.attendance.channelId = null;
+                        }
+                        break;
                 }
-            }]
-        });
-
+                
+                await guildSettings.save();
+                logger.info(`Updated guild settings after channel deletion: ${channelName}`);
+                
+                // إشعار المشرفين
+                try {
+                    const systemChannel = guild.systemChannel;
+                    if (systemChannel && systemChannel.viewable) {
+                        await systemChannel.send({
+                            content: `⚠️ تنبيه: تم حذف قناة مهمة (${channelName}). يرجى استخدام أمر \`/setup\` لإعادة تكوين النظام.`
+                        });
+                    }
+                } catch (notifyError) {
+                    logger.error('Error sending notification about deleted channel:', notifyError);
+                }
+            }
+        }
     } catch (error) {
-        console.error('Error in welcome message:', error);
+        logger.error('Error handling ChannelDelete event:', error);
     }
+});
+
+// معالجة حدث حذف الأدوار
+client.on(Events.RoleDelete, async (role) => {
+    try {
+        const guild = role.guild;
+        
+        // التحقق من إعدادات السيرفر
+        const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+        
+        if (guildSettings && guildSettings.attendanceRoleId === role.id) {
+            logger.warn(`Attendance role deleted in guild ${guild.name}`);
+            
+            // تحديث إعدادات السيرفر
+            guildSettings.attendanceRoleId = null;
+            await guildSettings.save();
+            
+            // إشعار المشرفين
+            try {
+                const systemChannel = guild.systemChannel;
+                if (systemChannel && systemChannel.viewable) {
+                    await systemChannel.send({
+                        content: `⚠️ تنبيه: تم حذف رتبة الحضور المهمة. يرجى استخدام أمر \`/setup attendance\` لإعادة تكوين نظام الحضور.`
+                    });
+                }
+            } catch (notifyError) {
+                logger.error('Error sending notification about deleted role:', notifyError);
+            }
+        }
+    } catch (error) {
+        logger.error('Error handling RoleDelete event:', error);
+    }
+});
+
+// معالجة حدث تغيير اسم القناة
+client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
+    try {
+        // نتحقق فقط من قنوات النصوص والفئات
+        if (!oldChannel.guild || !["GUILD_TEXT", "GUILD_CATEGORY", 0, 4].includes(oldChannel.type)) return;
+        
+        // إذا لم يتغير الاسم، نتجاهل
+        if (oldChannel.name === newChannel.name) return;
+        
+        const guild = newChannel.guild;
+        
+        // قائمة القنوات المهمة التي يستخدمها البوت
+        const criticalChannels = ['سجل-التذاكر', 'سجل-الحضور', 'طلب-تذكرة', 'تسجيل-الحضور'];
+        
+        if (criticalChannels.includes(oldChannel.name)) {
+            logger.warn(`Critical channel renamed: ${oldChannel.name} to ${newChannel.name} in guild ${guild.name}`);
+            
+            // تحقق من الإعدادات
+            const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+            
+            if (guildSettings) {
+                // إشعار المشرفين
+                try {
+                    const systemChannel = guild.systemChannel;
+                    if (systemChannel && systemChannel.viewable) {
+                        await systemChannel.send({
+                            content: `⚠️ تنبيه: تم تغيير اسم قناة مهمة من "${oldChannel.name}" إلى "${newChannel.name}". قد يؤثر هذا على وظائف البوت. إذا واجهت مشاكل، استخدم أمر \`/setup\` لإعادة الإعداد.`
+                        });
+                        
+                        // محاولة إعادة تسمية القناة (اختياري - إذا كان لدى البوت صلاحيات)
+                        try {
+                            await newChannel.setName(oldChannel.name, 'استعادة اسم قناة مهمة للبوت');
+                            await systemChannel.send({
+                                content: `✅ تمت إعادة تسمية القناة إلى "${oldChannel.name}" للحفاظ على وظائف البوت.`
+                            });
+                        } catch (renameError) {
+                            logger.error(`Cannot rename channel back to ${oldChannel.name}:`, renameError);
+                        }
+                    }
+                } catch (notifyError) {
+                    logger.error('Error sending notification about renamed channel:', notifyError);
+                }
+            }
+        }
+    } catch (error) {
+        logger.error('Error handling ChannelUpdate event:', error);
+    }
+});
+
+// معالجة حدث تغيير اسم الرتبة
+client.on(Events.RoleUpdate, async (oldRole, newRole) => {
+    try {
+        // نتحقق إذا تغير الاسم فقط
+        if (oldRole.name === newRole.name) return;
+        
+        const guild = newRole.guild;
+        
+        // التحقق من إعدادات السيرفر
+        const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+        
+        // التحقق إذا كانت الرتبة هي رتبة الحضور أو رتبة مهمة أخرى
+        const isAttendanceRole = guildSettings && guildSettings.attendanceRoleId === newRole.id;
+        const isImportantRole = oldRole.name === 'مسجل حضوره';
+        
+        if (isAttendanceRole || isImportantRole) {
+            logger.warn(`Important role renamed: ${oldRole.name} to ${newRole.name} in guild ${guild.name}`);
+            
+            // إشعار المشرفين
+            try {
+                const systemChannel = guild.systemChannel;
+                if (systemChannel && systemChannel.viewable) {
+                    await systemChannel.send({
+                        content: `⚠️ تنبيه: تم تغيير اسم رتبة مهمة من "${oldRole.name}" إلى "${newRole.name}". قد يؤثر هذا على وظائف البوت مثل نظام الحضور.`
+                    });
+                    
+                    // محاولة إعادة تسمية الرتبة (اختياري - إذا كان لدى البوت صلاحيات)
+                    if (isImportantRole) {
+                        try {
+                            await newRole.setName(oldRole.name, 'استعادة اسم رتبة مهمة للبوت');
+                            await systemChannel.send({
+                                content: `✅ تمت إعادة تسمية الرتبة إلى "${oldRole.name}" للحفاظ على وظائف البوت.`
+                            });
+                        } catch (renameError) {
+                            logger.error(`Cannot rename role back to ${oldRole.name}:`, renameError);
+                        }
+                    }
+                }
+            } catch (notifyError) {
+                logger.error('Error sending notification about renamed role:', notifyError);
+            }
+        }
+    } catch (error) {
+        logger.error('Error handling RoleUpdate event:', error);
+    }
+});
+
+/**
+ * دالة للتحقق من القنوات والأدوار المهمة وإصلاحها إذا لزم الأمر
+ * @param {Guild} guild كائن السيرفر للتحقق منه
+ */
+async function checkCriticalChannelsAndRoles(guild) {
+    try {
+        const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+        if (!guildSettings || !guildSettings.setupComplete) return;
+        
+        let needsUpdate = false;
+        const missingComponents = [];
+        
+        // التحقق من قنوات السجلات
+        if (guildSettings.features?.tickets?.enabled && guildSettings.features.tickets.logChannelId) {
+            const ticketLogChannel = guild.channels.cache.get(guildSettings.features.tickets.logChannelId);
+            if (!ticketLogChannel) {
+                logger.warn(`Ticket log channel missing in guild ${guild.name}`);
+                missingComponents.push('قناة سجل التذاكر');
+                needsUpdate = true;
+            }
+        }
+        
+        if (guildSettings.logsChannelId) {
+            const attendanceLogChannel = guild.channels.cache.get(guildSettings.logsChannelId);
+            if (!attendanceLogChannel) {
+                logger.warn(`Attendance log channel missing in guild ${guild.name}`);
+                missingComponents.push('قناة سجل الحضور');
+                needsUpdate = true;
+            }
+        }
+        
+        // التحقق من رتبة الحضور
+        if (guildSettings.attendanceRoleId) {
+            const attendanceRole = guild.roles.cache.get(guildSettings.attendanceRoleId);
+            if (!attendanceRole) {
+                logger.warn(`Attendance role missing in guild ${guild.name}`);
+                missingComponents.push('رتبة الحضور');
+                needsUpdate = true;
+            }
+        }
+        
+        // إرسال إشعار إذا كانت هناك مشاكل
+        if (needsUpdate) {
+            try {
+                const systemChannel = guild.systemChannel;
+                if (systemChannel && systemChannel.viewable) {
+                    await systemChannel.send({
+                        content: `⚠️ تنبيه: تم اكتشاف مشاكل في إعدادات البوت. المكونات المفقودة: ${missingComponents.join(', ')}. يرجى استخدام أمر \`/setup all\` لإعادة تكوين البوت.`
+                    });
+                }
+            } catch (notifyError) {
+                logger.error('Error sending notification about missing channels/roles:', notifyError);
+            }
+        }
+        
+    } catch (error) {
+        logger.error(`Error checking critical channels and roles for ${guild.name}:`, error);
+    }
+}
+
+// محاولة إعادة الإعداد بعد 5 ثواني في حالة الفشل
+client.on(Events.GuildCreate, guild => {
+    setTimeout(async () => {
+        try {
+            const guildConfig = await GuildSettings.findOne({ guildId: guild.id });
+            if (!guildConfig || !guildConfig.setupComplete) {
+                logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
+                await setupGuild(guild, { forceReset: true, cleanExisting: true }); // استخدام دالة setupGuild مع خيارات إعادة الإعداد
+            }
+        } catch (error) {
+            logger.error(`فشل في إعادة إعداد السيرفر ${guild.name}:`, error);
+        }
+    }, 5000);
 });
 
 // ============= دوال معالجة التذاكر والحضور =============
@@ -794,7 +1013,7 @@ async function handleCloseTicket(interaction) {
     }
 }
 
-// دالة مساعدة لحساب مدة التذكرة
+// دالة لحساب مدة التذكرة
 function getTicketDuration(createdAt) {
     const duration = new Date() - createdAt;
     const days = Math.floor(duration / (1000 * 60 * 60 * 24));
@@ -1107,7 +1326,7 @@ function splitMessage(message, limit = 1024) {
 async function handleInteractionError(interaction, error, context = {}) {
     try {
         const errorMessage = {
-            content: '❌ عذراً، حدث خطأ أثناء معالجة طلبك. الرجاء المحاولة مرة أخرى لاحقاً.',
+            content: '❌ عذراً، حدث خطأ أثناء معالجة طلبك. الرجاء المحاولة مرة أخرى.',
             ephemeral: true
         };
 
@@ -1328,8 +1547,8 @@ async function createDiscordChannel(guild, options) {
 // ============= تحسينات الأمان =============
 
 // حماية من التكرار المفرط للطلبات
-const rateLimit = require('express-rate-limit');
-const limiter = rateLimit({
+const rateLimits = require('express-rate-limit');
+const limiter = rateLimits({
     windowMs: 15 * 60 * 1000, // 15 دقيقة
     max: 100, // حد أقصى 100 طلب
     message: 'تم تجاوز الحد المسموح من الطلبات. الرجاء المحاولة لاحقاً.',
@@ -1543,7 +1762,7 @@ async function deployCommands(client) {
             console.log('Using alternate method to load commands...');
             const commandsPath = path.join(__dirname, 'commands');
             const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-            
+
             for (const file of commandFiles) {
                 const filePath = path.join(commandsPath, file);
                 try {
@@ -1588,58 +1807,6 @@ client.once('ready', async () => {
     } catch (error) {
         console.error('Error in ready event:', error);
     }
-});
-
-client.on(Events.GuildCreate, async (guild) => {
-    try {
-        // التحقق من Rate Limit لإعداد السيرفر
-        const setupLimitKey = `guild_setup:${guild.id}`;
-        if (!checkRateLimit(guild.id, 'setup', 1, 60000)) {
-            logger.warn(`Setup was ignored for ${guild.name} because of rate limit`);
-            return;
-        }
-
-        logger.info(`Bot added to new server: ${guild.name}`);
-        
-        // التحقق من وجود إعدادات سابقة
-        const existingSettings = await GuildSettings.findOne({ guildId: guild.id });
-        if (existingSettings && existingSettings.setupComplete) {
-            logger.info(`${guild.name} has already been set up`);
-            return;
-        }
-
-        logger.info(`Starting setup for ${guild.name}`);
-        await setupGuild(guild); // استخدام دالة setupGuild
-        
-    } catch (error) {
-        logger.error(`Error setting up guild ${guild.name}:`, error);
-        // محاولة إعادة الإعداد مرة واحدة بعد 5 ثواني في حالة الفشل
-        setTimeout(async () => {
-            try {
-                if (checkRateLimit(guild.id, 'setup_retry', 1, 60000)) {
-                    logger.info(`Retrying setup for ${guild.name}`);
-                    await setupGuild(guild); // استخدام دالة setupGuild
-                }
-            } catch (retryError) {
-                logger.error(`Failed to retry setup for ${guild.name}:`, retryError);
-            }
-        }, 5000);
-    }
-});
-
-// محاولة إعادة الإعداد بعد 5 ثواني في حالة الفشل
-client.on(Events.GuildCreate, guild => {
-    setTimeout(async () => {
-        try {
-            const guildConfig = await GuildSettings.findOne({ guildId: guild.id });
-            if (!guildConfig || !guildConfig.setupComplete) {
-                logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
-                await setupGuild(guild); // استخدام دالة setupGuild
-            }
-        } catch (error) {
-            logger.error(`فشل في إعادة إعداد السيرفر ${guild.name}:`, error);
-        }
-    }, 5000);
 });
 
 // دالة فحص الغياب وإنشاء التقرير
@@ -1908,8 +2075,18 @@ async function generateDailyAttendanceLog(guild) {
         reportText = sortedUsers.map(([, stats], index) => {
             const hours = Math.floor(stats.totalMinutes / 60);
             const minutes = stats.totalMinutes % 60;
+            
+            let timeText = [];
+            if (hours > 0) {
+                timeText.push(formatArabicTime(hours, 'ساعة', 'ساعتان', 'ساعات'));
+            }
+            if (minutes > 0) {
+                if (timeText.length > 0) timeText.push('و');
+                timeText.push(formatArabicTime(minutes, 'دقيقة', 'دقيقتان', 'دقائق'));
+            }
+            
             return `**${index + 1}.** ${stats.username}\n` +
-                `⏰ المدة: ${hours}:${minutes.toString().padStart(2, '0')} ساعة\n` +
+                `⏰ المدة: ${timeText.join(' ') || 'لا يوجد'}\n` +
                 `📊 عدد الجلسات: ${stats.sessions}\n` +
                 `🕐 أول حضور: ${stats.earliestCheckIn ? formatTimeInRiyadh(stats.earliestCheckIn) : 'غير متوفر'}\n` +
                 `🕐 آخر انصراف: ${stats.latestCheckOut ? formatTimeInRiyadh(stats.latestCheckOut) : 'غير متوفر'}\n`;
@@ -1984,7 +2161,7 @@ async function checkAttendanceAndLeave(userId, guildId) {
     return { attendanceRecord, leaveRecord };
 }
 
-client.on(Events.InteractionCreate, async interaction => {
+client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
         if (interaction.customId === 'ticket_modal') {
             const content = interaction.fields.getTextInputValue('ticket_content');
