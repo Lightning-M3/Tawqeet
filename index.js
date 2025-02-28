@@ -2455,15 +2455,6 @@ async function generateWeeklyAttendanceLog(guild) {
 // إعداد وظائف الكرون
 setupDailyReset(client);
 
-// دالة لتنسيق الأرقام والوقت بالعربية
-function formatArabicTime(number, singular, dual, plural) {
-    if (number === 0) return '';
-    if (number === 1) return `${singular} واحدة`;
-    if (number === 2) return `${dual}`;
-    if (number >= 3 && number <= 10) return `${number} ${plural}`;
-    return `${number} ${singular}`;
-}
-
 // ============= معالجة الأخطاء العامة =============
 process.on('unhandledRejection', (error) => {
     logger.error('خطأ غير معالج (Unhandled Rejection):', {
