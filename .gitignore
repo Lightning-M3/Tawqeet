@@ -1,0 +1,68 @@
+# الملفات البيئية والسرية
+.env
+.env.*
+*.env
+config.json
+
+# ملفات السجلات
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# مجلدات النظام
+node_modules/
+jspm_packages/
+bower_components/
+
+# مجلدات التخزين المؤقت
+.npm
+.eslintcache
+.node_repl_history
+.yarn-integrity
+.cache
+.parcel-cache
+
+# مجلدات البناء
+dist/
+build/
+out/
+.next/
+.nuxt/
+.vuepress/dist
+.serverless/
+.fusebox/
+
+# مجلدات النسخ الاحتياطية
+backup/
+backups/
+tmp/
+
+# ملفات النظام
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# ملفات IDE ومحررات النصوص
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# ملفات خاصة بالمشروع
+pebblehost.yml
+.template
