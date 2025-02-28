@@ -138,8 +138,8 @@ async function createTicketChannel(interaction, ticketContent) {
         const ticketNumber = String(ticketCount).padStart(4, '0');
         const ticketName = `ticket-${ticketNumber}`;
         
-        // إعداد خيارات القناة
-        const channelOptions = {
+        // إنشاء القناة باستخدام أسلوب الإصدار 14 من discord.js
+        const ticketChannel = await guild.channels.create({
             name: ticketName,
             type: ChannelType.GuildText,
             permissionOverwrites: [
@@ -163,12 +163,9 @@ async function createTicketChannel(interaction, ticketContent) {
                         PermissionFlagsBits.ReadMessageHistory,
                         PermissionFlagsBits.ManageChannels
                     ]
-                },
-            ],
-        };
-
-        // إنشاء القناة
-        const ticketChannel = await guild.channels.create(channelOptions);
+                }
+            ]
+        });
         
         // حفظ التذكرة في قاعدة البيانات
         const ticket = new Ticket({
