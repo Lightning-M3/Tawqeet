@@ -148,6 +148,7 @@ const attendanceLocks = new Map();
 // ============= استيراد الملفات المحلية =============
 const { setupDailyReset, forceCheckOutAll, sendDailyReport } = require('./cronJobs/dailyReset');
 const { handleError } = require('./utils/helpers'); // استيراد دالة handleError بشكل صحيح
+const { updateBotPresence } = require('./utils/botPresence'); // استيراد دالة تحديث حالة البوت
 
 // معالجة الأخطاء غير المتوقعة
 process.on('uncaughtException', (error) => {
