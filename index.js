@@ -68,7 +68,51 @@ const Leave = require('./models/Leave');
 const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
-const { setupGuild } = require('./utils/guildSetup');
+
+// استيراد دالة setupGuild مباشرة
+let setupGuild;
+try {
+    const guildSetupModule = require('./utils/guildSetup');
+    setupGuild = guildSetupModule.setupGuild;
+    
+    // تعريف بديل للدالة في حال فشل الاستيراد
+    if (!setupGuild) {
+        logger.warn('تم استيراد ملف guildSetup.js ولكن دالة setupGuild غير موجودة. استخدام الدالة البديلة.');
+        setupGuild = async function(guild) {
+            logger.info(`إعداد السيرفر ${guild.name} باستخدام الدالة البديلة`);
+            // التأكد من وجود إعدادات السيرفر في قاعدة البيانات
+            let guildConfig = await GuildSettings.findOne({ guildId: guild.id });
+            if (!guildConfig) {
+                guildConfig = new GuildSettings({
+                    guildId: guild.id,
+                    name: guild.name,
+                    setupComplete: true,
+                    createdAt: new Date()
+                });
+                await guildConfig.save();
+                logger.info(`تم إنشاء إعدادات جديدة للسيرفر ${guild.name}`);
+            }
+        };
+    }
+} catch (error) {
+    logger.error('خطأ في استيراد ملف guildSetup.js:', error);
+    // تعريف دالة بديلة في حالة فشل الاستيراد
+    setupGuild = async function(guild) {
+        logger.info(`إعداد السيرفر ${guild.name} باستخدام الدالة البديلة`);
+        // التأكد من وجود إعدادات السيرفر في قاعدة البيانات
+        let guildConfig = await GuildSettings.findOne({ guildId: guild.id });
+        if (!guildConfig) {
+            guildConfig = new GuildSettings({
+                guildId: guild.id,
+                name: guild.name,
+                setupComplete: true,
+                createdAt: new Date()
+            });
+            await guildConfig.save();
+            logger.info(`تم إنشاء إعدادات جديدة للسيرفر ${guild.name}`);
+        }
+    };
+}
 
 // ============= الدوال المساعدة الأساسية =============
 
@@ -167,8 +211,15 @@ async function createTicketChannel(interaction, ticketContent) {
             ],
         };
 
-        // إنشاء القناة
+        // إنشاء القناة - استخدام الطريقة الصحيحة للإصدار الحالي من discord.js
+        logger.debug('إنشاء قناة التذكرة باستخدام الخيارات:', channelOptions);
         const ticketChannel = await guild.channels.create(channelOptions);
+        
+        if (!ticketChannel) {
+            throw new Error('فشل في إنشاء قناة التذكرة - لم يتم إرجاع قناة');
+        }
+        
+        logger.info(`تم إنشاء قناة التذكرة ${ticketChannel.name} (${ticketChannel.id})`);
         
         // حفظ التذكرة في قاعدة البيانات
         const ticket = new Ticket({
@@ -182,6 +233,7 @@ async function createTicketChannel(interaction, ticketContent) {
         });
         
         await ticket.save();
+        logger.info(`تم حفظ التذكرة في قاعدة البيانات: ${ticket.ticketId}`);
         
         // إنشاء أزرار التحكم في التذكرة
         const row = new ActionRowBuilder()

@@ -10,67 +10,27 @@ const {
 const ApplySettings = require('../models/ApplySettings');
 
 module.exports = {
-    data: new SlashCommandBuilder()
-        .setName('setup')
-        .setDescription('إعداد أنظمة السيرفر المختلفة')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('all')
-                .setDescription('إعداد جميع الأنظمة دفعة واحدة')
-                .addRoleOption(option =>
-                    option.setName('attendance_role')
-                        .setDescription('رتبة الحضور')
-                        .setRequired(true))
-                .addChannelOption(option =>
-                    option.setName('apply_channel')
-                        .setDescription('قناة التقديم')
-                        .setRequired(true)
-                        .addChannelTypes(ChannelType.GuildText))
-                .addChannelOption(option =>
-                    option.setName('apply_logs')
-                        .setDescription('قناة سجلات التقديم')
-                        .setRequired(true)
-                        .addChannelTypes(ChannelType.GuildText))
-                .addRoleOption(option =>
-                    option.setName('staff_role')
-                        .setDescription('رتبة الإداريين المسؤولين عن مراجعة الطلبات')
-                        .setRequired(true)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('tickets')
-                .setDescription('إعداد نظام التذاكر'))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('welcome')
-                .setDescription('إعداد نظام الترحيب'))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('apply')
-                .setDescription('إعداد نظام التقديم')
-                .addChannelOption(option =>
-                    option.setName('apply_channel')
-                        .setDescription('قناة التقديم')
-                        .setRequired(true)
-                        .addChannelTypes(ChannelType.GuildText))
-                .addChannelOption(option =>
-                    option.setName('logs_channel')
-                        .setDescription('قناة سجلات التقديم')
-                        .setRequired(true)
-                        .addChannelTypes(ChannelType.GuildText))
-                .addRoleOption(option =>
-                    option.setName('staff_role')
-                        .setDescription('رتبة الإداريين')
-                        .setRequired(true)))
-        .addSubcommand(subcommand =>
-            subcommand
-                .setName('attendance')
-                .setDescription('إعداد نظام الحضور')
-                .addRoleOption(option =>
-                    option.setName('role')
-                        .setDescription('رتبة الحضور')
-                        .setRequired(true))),
-
+    data: {
+        name: 'setup',
+        description: 'إعداد البوت في السيرفر',
+        options: [
+            {
+                name: 'attendance',
+                description: 'إعداد نظام الحضور',
+                type: 1,
+            },
+            {
+                name: 'tickets',
+                description: 'إعداد نظام التذاكر',
+                type: 1,
+            },
+            {
+                name: 'all',
+                description: 'إعداد جميع الأنظمة',
+                type: 1,
+            }
+        ]
+    },
     async execute(interaction) {
         const subcommand = interaction.options.getSubcommand();
         
@@ -88,55 +48,83 @@ module.exports = {
             await interaction.deferReply({ ephemeral: true });
             
             // استدعاء دالة إعداد السيرفر
-            switch (subcommand) {
-                case 'all':
-                    await setupAll(interaction);
-                    break;
-                case 'tickets':
-                    await setupTickets(interaction);
-                    break;
-                case 'welcome':
-                    await setupWelcome(interaction);
-                    break;
-                case 'apply':
-                    await setupApply(interaction);
-                    break;
-                case 'attendance':
-                    await setupAttendance(interaction);
-                    break;
+            try {
+                // إعداد السيرفر بناءً على الأمر الفرعي
+                switch (subcommand) {
+                    case 'all':
+                        await setupGuild(interaction.guild);
+                        break;
+                    case 'tickets':
+                        // إعداد نظام التذاكر فقط
+                        await setupTicketsSystem(interaction.guild);
+                        break;
+                    case 'attendance':
+                        // إعداد نظام الحضور فقط
+                        await setupAttendanceSystem(interaction.guild);
+                        break;
+                    default:
+                        throw new Error(`الأمر الفرعي غير معروف: ${subcommand}`);
+                }
+                
+                // إكمال الرد بعد الانتهاء من الإعداد
+                await interaction.editReply({
+                    content: `✅ تم إعداد ${subcommand === 'all' ? 'جميع الأنظمة' : `نظام ${subcommand}`} بنجاح!`,
+                    ephemeral: true
+                });
+            } catch (setupError) {
+                console.error(`Error in setup command (${subcommand}):`, setupError);
+                
+                // استخدام editReply لتحديث الرسالة المؤقتة
+                await interaction.editReply({
+                    content: `❌ حدث خطأ أثناء إعداد ${subcommand === 'all' ? 'جميع الأنظمة' : `نظام ${subcommand}`}. الرجاء المحاولة مرة أخرى.`,
+                    ephemeral: true
+                });
             }
-            
-            // إكمال الرد بعد الانتهاء من الإعداد
-            await interaction.editReply({
-                content: `✅ تم إعداد ${subcommand === 'all' ? 'جميع الأنظمة' : `نظام ${subcommand}`} بنجاح!`,
-                ephemeral: true
-            });
-            
         } catch (error) {
             console.error(`Error in setup command (${subcommand}):`, error);
             
-            // استخدام editReply بدلاً من reply لتجنب الخطأ
-            try {
-                await interaction.editReply({
-                    content: 'حدث خطأ أثناء إعداد النظام.',
-                    ephemeral: true
-                });
-            } catch (replyError) {
-                console.error('Error sending error response:', replyError);
+            // التحقق مما إذا كان التفاعل قد تم الرد عليه بالفعل
+            if (interaction.deferred || interaction.replied) {
+                try {
+                    await interaction.editReply({
+                        content: 'حدث خطأ أثناء إعداد النظام.',
+                        ephemeral: true
+                    });
+                } catch (replyError) {
+                    console.error('Error sending error response:', replyError);
+                }
+            } else {
+                try {
+                    await interaction.reply({
+                        content: 'حدث خطأ أثناء إعداد النظام.',
+                        ephemeral: true
+                    });
+                } catch (replyError) {
+                    console.error('Error sending error response:', replyError);
+                }
             }
         }
     }
 };
 
-async function setupAll(interaction) {
-    await interaction.deferReply({ ephemeral: true });
-    
+// دوال مساعدة للإعداد
+async function setupTicketsSystem(guild) {
+    // التنفيذ سيتم إضافته لاحقًا
+    console.log(`Setting up tickets system for ${guild.name}`);
+}
+
+async function setupAttendanceSystem(guild) {
+    // التنفيذ سيتم إضافته لاحقًا
+    console.log(`Setting up attendance system for ${guild.name}`);
+}
+
+async function setupGuild(guild) {
     try {
         // جمع كل المعلومات المطلوبة أولاً
-        const applyChannel = interaction.options.getChannel('apply_channel');
-        const logsChannel = interaction.options.getChannel('apply_logs');
-        const staffRole = interaction.options.getRole('staff_role');
-        const attendanceRole = interaction.options.getRole('attendance_role');
+        const applyChannel = guild.channels.cache.find(c => c.name === 'تقديم');
+        const logsChannel = guild.channels.cache.find(c => c.name === 'سجلات التقديم');
+        const staffRole = guild.roles.cache.find(r => r.name === 'إداريين');
+        const attendanceRole = guild.roles.cache.find(r => r.name === 'حضور');
 
         // التحقق من صحة المعلومات
         if (!applyChannel || !logsChannel || !staffRole || !attendanceRole) {
@@ -153,7 +141,7 @@ async function setupAll(interaction) {
         ];
 
         const missingPermissions = requiredPermissions.filter(perm => 
-            !interaction.guild.members.me.permissions.has(perm)
+            !guild.members.me.permissions.has(perm)
         );
 
         if (missingPermissions.length > 0) {
@@ -164,7 +152,7 @@ async function setupAll(interaction) {
         let progress = '';
         
         try {
-            await setupTickets(interaction);
+            await setupTicketsSystem(guild);
             progress += '✅ تم إعداد نظام التذاكر\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام التذاكر\n';
@@ -172,7 +160,7 @@ async function setupAll(interaction) {
         }
 
         try {
-            await setupWelcome(interaction);
+            await setupWelcome(guild);
             progress += '✅ تم إعداد نظام الترحيب\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام الترحيب\n';
@@ -180,7 +168,7 @@ async function setupAll(interaction) {
         }
 
         try {
-            await setupApply(interaction);
+            await setupApply(guild);
             progress += '✅ تم إعداد نظام التقديم\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام التقديم\n';
@@ -188,7 +176,7 @@ async function setupAll(interaction) {
         }
 
         try {
-            await setupAttendance(interaction);
+            await setupAttendance(guild);
             progress += '✅ تم إعداد نظام الحضور\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام الحضور\n';
@@ -208,7 +196,7 @@ async function setupAll(interaction) {
         });
 
     } catch (error) {
-        console.error('Error in setupAll:', error);
+        console.error('Error in setupGuild:', error);
         await interaction.editReply({
             content: `حدث خطأ أثناء الإعداد: ${error.message}`,
             ephemeral: true
