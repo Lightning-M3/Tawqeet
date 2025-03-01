@@ -107,17 +107,55 @@ attendanceSchema.statics.createAttendance = async function(userId, guildId, chec
 
 // إضافة طريقة ساكنة للتحديث المباشر للكفاءة
 attendanceSchema.statics.updateAttendance = async function(userId, guildId, date, sessionData) {
-  // تحديث سجل الحضور باستخدام جلسة جديدة
-  const result = await this.findOneAndUpdate(
-    { userId, guildId, date },
-    { 
-      $push: { sessions: sessionData },
-      $set: { lastUpdated: new Date() }
-    },
-    { new: true, upsert: true }
-  );
-  
-  return result;
+  try {
+    // تحديث سجل الحضور باستخدام جلسة جديدة بطريقة آمنة تتجنب مشكلة تكرار المفتاح
+    const options = { 
+      new: true, 
+      upsert: true,
+      // استخدام runValidators لضمان صحة البيانات
+      runValidators: true,
+      // تعيين setDefaultsOnInsert لاستخدام القيم الافتراضية فقط عند الإنشاء
+      setDefaultsOnInsert: true
+    };
+    
+    // التحقق من وجود سجل قبل عملية التحديث
+    const existingRecord = await this.findOne({ userId, guildId, date });
+    
+    if (existingRecord) {
+      // إذا كان السجل موجودًا، فقط نضيف الجلسة الجديدة
+      return await this.findOneAndUpdate(
+        { userId, guildId, date },
+        { 
+          $push: { sessions: sessionData },
+          $set: { lastUpdated: new Date() }
+        },
+        { new: true }
+      );
+    } else {
+      // إذا لم يكن السجل موجودًا، نقوم بإنشائه
+      const newRecord = new this({
+        userId,
+        guildId,
+        date,
+        sessions: [sessionData],
+        lastUpdated: new Date()
+      });
+      
+      return await newRecord.save();
+    }
+  } catch (error) {
+    // معالجة خطأ تكرار المفتاح بشكل خاص
+    if (error.code === 11000) {
+      // في حالة حدوث خطأ تكرار، نعيد محاولة الإضافة كتحديث بدلاً من إنشاء
+      const record = await this.findOne({ userId, guildId, date });
+      if (record) {
+        record.sessions.push(sessionData);
+        record.lastUpdated = new Date();
+        return await record.save();
+      }
+    }
+    throw error;
+  }
 };
 
 // إضافة طريقة لتحديث معلومات تسجيل الخروج بكفاءة (بدون قراءة ثم كتابة)

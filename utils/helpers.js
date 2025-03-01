@@ -39,6 +39,13 @@ async function retryOperation(operation, maxRetries = 5, initialDelay = 1000, ma
     try {
       return await operation();
     } catch (error) {
+      // عدم إعادة المحاولة مع أخطاء تكرار المفاتيح
+      if (error.message && error.message.includes('E11000 duplicate key error')) {
+        logger.warn('تم اكتشاف محاولة تكرار إدخال مفتاح فريد', { error: error.message });
+        // تحويل خطأ تكرار المفتاح إلى خطأ مفهوم وشرح ما حدث
+        throw new Error('هذا السجل موجود بالفعل في قاعدة البيانات');
+      }
+      
       if (i === maxRetries - 1) throw error;
       
       logger.warn(`Retry attempt ${i + 1}/${maxRetries}`, { error: error.message });

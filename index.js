@@ -1154,38 +1154,44 @@ async function handleCheckIn(interaction) {
         // استخدام الدالة الجديدة للتحقق من السجلات
         const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
 
-        if (!attendanceRecord) {
-            await retryOperation(async () => {
-                return await Attendance.createAttendance(
-                    interaction.user.id,
-                    interaction.guild.id,
-                    convertToRiyadhTime(new Date())
-                );
-            }).catch(err => {
-                logger.error('Error creating attendance record:', err);
-                throw new Error('فشل في إنشاء سجل الحضور');
-            });
-        } else {
+        if (attendanceRecord) {
             // التحقق من عدم وجود جلسة مفتوحة
             const hasOpenSession = attendanceRecord.sessions.some(session => !session.checkOut);
             if (hasOpenSession) {
+                attendanceLocks.delete(userId);
                 return await interaction.followUp({
                     content: '❌ لديك جلسة حضور مفتوحة بالفعل',
                     ephemeral: true
                 });
             }
-
-            // إضافة جلسة جديدة
+            
+            // إضافة جلسة جديدة إلى السجل الموجود
             attendanceRecord.sessions.push({
                 checkIn: convertToRiyadhTime(new Date()),
                 duration: 0
             });
-
+            
+            // حفظ التغييرات
+            await attendanceRecord.save();
+        } else {
+            // استخدام updateAttendance بدلاً من createAttendance لتجنب تكرار المفتاح
             await retryOperation(async () => {
-                return await attendanceRecord.save();
+                const now = convertToRiyadhTime(new Date());
+                const today = new Date(now);
+                today.setUTCHours(0, 0, 0, 0);
+                
+                return await Attendance.updateAttendance(
+                    interaction.user.id,
+                    interaction.guild.id,
+                    today,
+                    {
+                        checkIn: now,
+                        duration: 0
+                    }
+                );
             }).catch(err => {
-                logger.error('Error saving attendance record:', err);
-                throw new Error('فشل في حفظ سجل الحضور');
+                logger.error('Error creating attendance record:', err);
+                throw new Error('فشل في إنشاء سجل الحضور');
             });
         }
 
