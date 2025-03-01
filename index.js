@@ -22,12 +22,6 @@ const mongoose = require('mongoose');
 const cron = require('node-cron');
 const NodeCache = require('node-cache');
 const moment = require('moment-timezone');
-const { 
-    checkRequiredChannels, 
-    checkBotPermissions, 
-    retryOperation, // استخدام الدالة المستوردة من helpers.js
-    formatArabicTime
-} = require('./utils/helpers');
 require('dotenv').config();
 
 // ============= دوال مساعدة للتعامل مع التوقيت =============
@@ -74,49 +68,149 @@ const Leave = require('./models/Leave');
 const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
-const { setupGuild } = require('./utils/guildSetup'); // استيراد دالة setupGuild
 
-// ============= الدوال المساعدة =============
+// ============= الدوال المساعدة الأساسية =============
 
-/**
- * دالة لاستنساخ الكائنات بأمان مع تجنب مشاكل خصائص القراءة فقط مثل TCP
- * @param {Object} obj الكائن المراد نسخه
- * @returns {Object} نسخة آمنة من الكائن
- */
-
-// ============= وظائف إدارة الأخطاء =============
-// تم نقل دالة retryOperation إلى ملف helpers.js
-// وتم استيرادها في أعلى الملف
-
-// دالة checkRateLimit لمنع التكرار المفرط
-async function checkRateLimit(userId, action, limit = 5, windowMs = 60000) {
-    const key = `${userId}-${action}`;
-    const now = Date.now();
-    const userLimits = rateLimits.get(key) || [];
-    
-    // إزالة الطلبات القديمة
-    const validRequests = userLimits.filter(timestamp => now - timestamp < windowMs);
-    
-    if (validRequests.length >= limit) {
-        return false; // تجاوز الحد
-    }
-    
-    // إضافة الطلب الجديد
-    validRequests.push(now);
-    rateLimits.set(key, validRequests);
-    
-    // تنظيف تلقائي بعد انتهاء النافذة الزمنية
-    setTimeout(() => {
-        const currentLimits = rateLimits.get(key) || [];
-        const updatedLimits = currentLimits.filter(timestamp => now - timestamp < windowMs);
-        if (updatedLimits.length === 0) {
-            rateLimits.delete(key);
-        } else {
-            rateLimits.set(key, updatedLimits);
+// دالة لإعادة محاولة العمليات على قاعدة البيانات
+async function retryOperation(operation, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await operation();
+        } catch (error) {
+            if (i === maxRetries - 1) throw error;
+            
+            logger.warn(`Retry attempt ${i + 1}/${maxRetries}`, { error: error.message });
+            
+            await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+            
+            if (mongoose.connection.readyState !== 1) {
+                try {
+                    await mongoose.connect(process.env.MONGO_URI);
+                } catch (connError) {
+                    logger.error('Failed to reconnect:', connError);
+                }
+            }
         }
-    }, windowMs);
+    }
+}
 
-    return true;
+async function handleCreateTicket(interaction) {
+    try {
+        // التحقق من حدود التذاكر
+        const limits = await checkTicketLimits(interaction.user.id, interaction.guild.id);
+        if (!limits.allowed) {
+            return await interaction.reply({
+                content: `❌ ${limits.reason}`,
+                ephemeral: true
+            });
+        }
+
+        // إنشاء Modal لإدخال محتوى التذكرة
+        const modal = new ModalBuilder()
+            .setCustomId('ticket_modal')
+            .setTitle('إنشاء تذكرة جديدة');
+
+        const contentInput = new TextInputBuilder()
+            .setCustomId('ticket_content')
+            .setLabel('محتوى التذكرة')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true);
+
+        const actionRow = new ActionRowBuilder().addComponents(contentInput);
+        modal.addComponents(actionRow);
+
+        // عرض الـ Modal للمستخدم
+        await interaction.showModal(modal);
+    } catch (error) {
+        console.error('خطأ في إنشاء التذكرة:', error);
+        await handleInteractionError(interaction, error); // استخدام دالة معالجة الأخطاء
+    }
+}
+
+// دالة لإنشاء قناة التذكرة
+async function createTicketChannel(interaction, ticketType) {
+    const guild = interaction.guild;
+    const member = interaction.member;
+
+    // الحصول على عدد التذاكر الحالية
+    const ticketCount = await Ticket.countDocuments({ guildId: guild.id });
+    const ticketNumber = String(ticketCount + 1).padStart(4, '0'); // تنسيق الرقم
+
+    // إنشاء اسم للتذكرة
+    const ticketName = `تذكرة-${ticketNumber}`;
+
+    try {
+        // الحصول على الفئة (category) من القناة الأصلية
+        const parentChannel = interaction.channel.parent; // الحصول على الفئة من القناة التي تم استخدامها
+        const channelOptions = {
+            name: ticketName,
+            type: 0, // نوع القناة النصية
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: ['ViewChannel'],
+                },
+                {
+                    id: member.id,
+                    allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'],
+                },
+                {
+                    id: interaction.client.user.id,
+                    allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'],
+                },
+            ],
+        };
+
+        // إنشاء القناة
+        const ticketChannel = await guild.channels.create(ticketName, channelOptions);
+    
+        // حفظ التذكرة في قاعدة البيانات
+        const ticket = new Ticket({
+            ticketId: `TICKET-${ticketNumber}`,
+            userId: member.id,
+            guildId: guild.id,
+            channelId: ticketChannel.id,
+            status: 'open',
+            createdAt: new Date(),
+        });
+        await ticket.save();
+
+        // إرسال الرسالة الأولى في التذكرة
+        const embed = new EmbedBuilder()
+            .setTitle(`تذكرة ${ticketType}`)
+            .setDescription(`مرحباً ${member}! سيقوم فريق الدعم بالرد عليك قريباً.\nاضغط على زر إغلاق التذكرة لتغلقها (للمسؤولين فقط)`)
+            .setColor(0x00ff00)
+            .setTimestamp();
+
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('close_ticket')
+                    .setLabel('إغلاق التذكرة')
+                    .setStyle(ButtonStyle.Danger)
+            );
+
+        await channel.send({
+            embeds: [embed],
+            components: [row]
+        });
+
+        return ticketChannel;
+    } catch (error) {
+        logger.error('Error in OpenTicket:', error);
+    }
+}
+
+// دالة لتسجيل أحداث التذاكر
+async function logTicketAction(guild, embed) {
+    try {
+        const logChannel = guild.channels.cache.find(c => c.name === 'سجل-التذاكر');
+        if (logChannel) {
+            await logChannel.send({ embeds: [embed] });
+        }
+    } catch (error) {
+        logger.error('Error logging ticket action:', error);
+    }
 }
 
 // ============= إعداد المتغيرات العامة =============
@@ -152,15 +246,13 @@ const commandCooldowns = new Map();
 const ticketAttempts = new Map();
 const attendanceLocks = new Map();
 
-// إعداد نظام التخزين المؤقت الذي سيستخدم للتفاعلات
-const commandCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 دقائق
-const userCache = new NodeCache({ stdTTL: 1800, checkperiod: 300 }); // 30 دقيقة
-const guildCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 }); // ساعة واحدة
-
 // ============= استيراد الملفات المحلية =============
 const { setupDailyReset, forceCheckOutAll, sendDailyReport } = require('./cronJobs/dailyReset');
-const { handleError } = require('./utils/helpers'); // استيراد دالة handleError بشكل صحيح
-const { updateBotPresence } = require('./utils/botPresence'); // استيراد دالة تحديث حالة البوت
+const { 
+    checkRequiredChannels, 
+    checkBotPermissions, 
+    handleError 
+} = require('./utils/helpers');
 
 // معالجة الأخطاء غير المتوقعة
 process.on('uncaughtException', (error) => {
@@ -176,80 +268,52 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // ============= الاتصال بقاعدة البيانات =============
 mongoose.set('bufferCommands', true);
-// تحسين إعدادات المصادقة والأمان
-mongoose.set('debug', process.env.NODE_ENV === 'development');
 
-// تكوين أكثر مرونة للاتصال
-const dbOptions = {
+mongoose.connect(process.env.MONGO_URI, {
     serverSelectionTimeoutMS: 30000,
-    socketTimeoutMS: 60000,
+    socketTimeoutMS: 45000,
     connectTimeoutMS: 30000,
-    maxPoolSize: 20,         // زيادة حجم المجمع لدعم المزيد من الاتصالات المتزامنة
-    minPoolSize: 5,          // ضمان وجود اتصالات كافية متاحة دائمًا
-    maxIdleTimeMS: 45000,    // السماح للاتصالات بالبقاء خاملة لفترة أطول
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    maxIdleTimeMS: 30000,
     waitQueueTimeoutMS: 30000,
-    heartbeatFrequencyMS: 10000,
-    autoIndex: process.env.NODE_ENV !== 'production', // تعطيل إنشاء الفهارس التلقائي في بيئة الإنتاج
-    retryWrites: true,
-    retryReads: true
-};
-
-// استخدام نمط التأخير التطوري المحسن للاتصال بقاعدة البيانات
-const connectWithRetry = async (attempt = 1, maxAttempts = 10, initialDelay = 2000) => {
-    try {
-        await mongoose.connect(process.env.MONGO_URI, dbOptions);
-        logger.info('Connected to MongoDB database successfully');
-        return true;
-    } catch (err) {
-        if (attempt >= maxAttempts) {
-            logger.error('Failed to connect to database after maximum attempts', { error: err.message, attempt, maxAttempts }, true);
-            process.exit(1);
-        }
-
-        const delay = Math.min(initialDelay * Math.pow(1.5, attempt - 1), 60000); // حد أقصى 60 ثانية
-        logger.warn(`Connection attempt ${attempt} failed. Retrying in ${delay}ms...`, { error: err.message });
-        
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return connectWithRetry(attempt + 1, maxAttempts, initialDelay);
-    }
-};
-
-// بدء الاتصال مع إعادة المحاولة
-connectWithRetry().catch(err => {
-    logger.error('Initial database connection failed:', { error: err.message }, true);
+    heartbeatFrequencyMS: 10000
+}).then(() => {
+    logger.info('Connected to MongoDB database');
+}).catch((err) => {
+    logger.error('Error connecting to database:', err, true);
     process.exit(1);
 });
 
-// استخدام آليات معالجة أخطاء متقدمة لاتصال قاعدة البيانات
+// معالجة أحداث قاعدة البيانات
 mongoose.connection.on('disconnected', async () => {
-    logger.warn('Database connection lost. Attempting to reconnect automatically...');
-    // mongoose سيحاول إعادة الاتصال تلقائيًا، لذا ننتظر قليلاً قبل التدخل
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    // إذا لم يتم إعادة الاتصال تلقائيًا، نحاول يدويًا
-    if (mongoose.connection.readyState !== 1) {
-        logger.info('Manually initiating database reconnection...');
-        await connectWithRetry();
+    console.log('Database connection lost. Attempting to reconnect...');
+    let retries = 5;
+    while (retries > 0) {
+        try {
+            await mongoose.connect(process.env.MONGO_URI);
+            console.log('Successfully reconnected to database');
+            break;
+        } catch (error) {
+            console.error(`Reconnection attempt failed. Remaining attempts: ${retries}`);
+            retries--;
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+    }
+    if (retries === 0) {
+        console.error('Failed to reconnect after multiple attempts. Shutting down bot...');
+        process.exit(1);
     }
 });
 
-mongoose.connection.on('connected', () => {
-    logger.info('Database connection established');
-});
-
-mongoose.connection.on('error', (err) => {
-    logger.error('Database connection error:', { error: err.message });
-});
-
-// إضافة دورة دورية للتحقق من حالة الاتصال بقاعدة البيانات كل ساعة
-setInterval(() => {
-    if (mongoose.connection.readyState !== 1) {
-        logger.warn('Database connection check: Not connected. Attempting to reconnect...');
-        connectWithRetry();
-    } else {
-        logger.debug('Database connection check: Connection healthy');
+mongoose.connection.on('error', async (err) => {
+    console.error('Database connection error:', err);
+    try {
+        await mongoose.connect(process.env.MONGO_URI);
+    } catch (error) {
+        console.error('Failed to reconnect:', error);
     }
-}, 60 * 60 * 1000); // كل ساعة
+});
 
 // ============= إعداد الأحداث الأساسية =============
 client.once(Events.ClientReady, async () => {
@@ -268,44 +332,14 @@ client.once(Events.ClientReady, async () => {
         // تنظيف الذاكرة المؤقتة كل ساعة
         setInterval(cleanupCache, 3600000);
         
-        // تحديث حالة البوت كل ساعة
-        setInterval(() => updateBotPresence(client), 3600000);
+        // تحديث حالة البوت كل 5 دقائق
+        setInterval(() => updateBotPresence(client), 300000);
 
     } catch (error) {
         logger.error('Error in bot initialization:', {
             error: error.message,
             stack: error.stack
         });
-    }
-});
-
-// معالجة حدث حذف السيرفر
-client.on('guildDelete', async (guild) => {
-    try {
-        logger.info(`Bot was removed from guild: ${guild.name} (${guild.id})`);
-        
-        // هنا يمكن تنفيذ أي إجراء تنظيف بعد الخروج من السيرفر
-        // مثلاً حذف بيانات السيرفر من قاعدة البيانات
-        await GuildSettings.deleteOne({ guildId: guild.id });
-        logger.info(`Deleted guild settings for guild: ${guild.id}`);
-        
-    } catch (error) {
-        logger.error(`Error in guildDelete event: ${error.message}`);
-    }
-});
-
-// إضافة معالج لحدث حذف القنوات
-client.on('channelDelete', async (channel) => {
-    try {
-        if (!channel.guild) return; // تجاهل القنوات غير التابعة لسيرفر
-        
-        logger.info(`Channel deleted: ${channel.name} (${channel.id}) in guild ${channel.guild.name}`);
-        
-        // تحديث إعدادات السيرفر بأمان
-        await GuildSettings.handleChannelDelete(channel.guild.id, channel.id);
-        
-    } catch (error) {
-        logger.error(`Error in channelDelete event: ${error.message}`, { error });
     }
 });
 
@@ -323,43 +357,27 @@ client.on('interactionCreate', async (interaction) => {
                 return;
             }
 
-            // استخدام التخزين المؤقت للأوامر المتكررة إذا كان الأمر يدعم ذلك
-            if (command.cacheable !== false) {
-                const cacheKey = getInteractionCacheKey(interaction);
-                const cachedResponse = commandCache.get(cacheKey);
-                
-                // استخدام الاستجابة المخزنة مؤقتًا إذا كانت متوفرة (للأوامر التي لا تتطلب تفاعلات فورية)
-                if (cachedResponse && command.allowCachedResponse !== false) {
-                    await interaction.reply(cachedResponse);
-                    return;
-                }
-                
-                // تنفيذ الأمر واحتمال تخزين النتيجة
-                try {
-                    const result = await command.execute(interaction, { 
-                        cache: {
-                            commandCache,
-                            userCache,
-                            guildCache,
-                            setCache: (data) => commandCache.set(cacheKey, data)
-                        } 
-                    });
-                    
-                    // تخزين النتيجة إذا أرجع الأمر بيانات قابلة للتخزين المؤقت
-                    if (result && command.cacheable !== false) {
-                        commandCache.set(cacheKey, result);
-                    }
-                } catch (error) {
-                    handleCommandError(interaction, error);
-                }
-                return;
-            }
-            
-            // للأوامر التي لا تدعم التخزين المؤقت
             try {
                 await command.execute(interaction);
             } catch (error) {
-                handleCommandError(interaction, error);
+                logger.error(`خطأ في تنفيذ الأمر ${interaction.commandName}:`, {
+                    error: error.message,
+                    stack: error.stack,
+                    command: interaction.commandName,
+                    options: interaction.options?.data
+                });
+
+                // التحقق من حالة التفاعل قبل الرد
+                const errorMessage = {
+                    content: '❌ حدث خطأ أثناء تنفيذ الأمر. الرجاء المحاولة مرة أخرى.',
+                    ephemeral: true
+                };
+
+                if (interaction.deferred) {
+                    await interaction.followUp(errorMessage);
+                } else if (!interaction.replied) {
+                    await interaction.reply(errorMessage);
+                }
             }
             return;
         }
@@ -375,20 +393,6 @@ client.on('interactionCreate', async (interaction) => {
                     userId: interaction.user.id
                 });
                 return;
-            }
-
-            // تحديد ما إذا كان التفاعل قابل للتخزين المؤقت
-            const isCacheable = !customId.includes('check_') && !customId.includes('ticket');
-            
-            // التحقق من وجود استجابة مخزنة مؤقتًا للتفاعلات المتكررة
-            if (isCacheable) {
-                const cacheKey = getInteractionCacheKey(interaction);
-                const cachedResponse = commandCache.get(cacheKey);
-                
-                if (cachedResponse) {
-                    await interaction.reply(cachedResponse);
-                    return;
-                }
             }
 
             // معالجة التفاعلات المختلفة
@@ -412,13 +416,6 @@ client.on('interactionCreate', async (interaction) => {
                     break;
                 case customId.startsWith('servers-list'):
                     // معالجة زر عرض قائمة السيرفرات
-                    const serversResponse = await handleServersList(interaction);
-                    
-                    // تخزين استجابة قائمة السيرفرات
-                    if (isCacheable && serversResponse) {
-                        const cacheKey = getInteractionCacheKey(interaction);
-                        commandCache.set(cacheKey, serversResponse);
-                    }
                     break;
                 default:
                     logger.warn('تفاعل غير معروف', {
@@ -444,7 +441,7 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
             const errorMessage = {
-                content: '❌ حدث خطأ غير متوقع. الرجاء المحاولة لاحقاً.',
+                content: '❌ حدث خطأ غير متوقع. الرجاء المحاولة مرة أخرى لاحقاً.',
                 ephemeral: true
             };
 
@@ -462,486 +459,159 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// دالة للحصول على مفتاح التخزين المؤقت للتفاعل
-function getInteractionCacheKey(interaction) {
-    if (interaction.isChatInputCommand()) {
-        // إنشاء مفتاح فريد للأمر استنادًا إلى الاسم والخيارات
-        const options = interaction.options?.data?.map(opt => 
-            `${opt.name}:${opt.value}`).join('-') || '';
-        return `cmd:${interaction.commandName}:${options}:${interaction.user.id}`;
-    } else if (interaction.isButton() || interaction.isModalSubmit()) {
-        return `interaction:${interaction.customId}:${interaction.user.id}`;
-    }
-    return null;
-}
-
-// إضافة معلومات الحضور إلى التخزين المؤقت
-function cacheUserAttendance(userId, guildId, data) {
-    userCache.set(`attendance:${userId}:${guildId}`, data);
-}
-
-// الحصول على معلومات الحضور من التخزين المؤقت
-function getCachedUserAttendance(userId, guildId) {
-    return userCache.get(`attendance:${userId}:${guildId}`);
-}
-
-// تعيين معلومات السيرفر في التخزين المؤقت
-function cacheGuildInfo(guildId, data) {
-    guildCache.set(`guild:${guildId}`, data);
-}
-
-// الحصول على معلومات السيرفر من التخزين المؤقت
-function getCachedGuildInfo(guildId) {
-    return guildCache.get(`guild:${guildId}`);
-}
-
-// دالة موحدة لمعالجة أخطاء الأوامر
-function handleCommandError(interaction, error) {
-    logger.error(`خطأ في تنفيذ الأمر ${interaction.commandName}:`, {
-        error: error.message,
-        stack: error.stack,
-        command: interaction.commandName,
-        options: interaction.options?.data
-    });
-
-    // التحقق من حالة التفاعل قبل الرد
-    const errorMessage = {
-        content: '❌ حدث خطأ أثناء تنفيذ الأمر. الرجاء المحاولة مرة أخرى.',
-        ephemeral: true
-    };
-
-    if (interaction.deferred) {
-        interaction.followUp(errorMessage).catch(e => {
-            logger.error('فشل في إرسال رد للخطأ:', e);
-        });
-    } else if (!interaction.replied) {
-        interaction.reply(errorMessage).catch(e => {
-            logger.error('فشل في إرسال رد للخطأ:', e);
-        });
-    }
-}
-
-// دالة تنظيف الذاكرة المؤقتة
-function cleanupCache() {
-    const commandStats = commandCache.getStats();
-    const userStats = userCache.getStats();
-    const guildStats = guildCache.getStats();
-    
-    logger.debug('Cache cleanup performed', {
-        commands: { keys: commandStats.keys, hits: commandStats.hits, misses: commandStats.misses },
-        users: { keys: userStats.keys, hits: userStats.hits, misses: userStats.misses },
-        guilds: { keys: guildStats.keys, hits: guildStats.hits, misses: guildStats.misses }
-    });
-    
-    // إذا كان هناك حمل عالٍ في وقت الذروة، نقوم بتنظيف التخزين المؤقت للأوامر
-    const currentHour = new Date().getHours();
-    const isPeakHour = currentHour >= 9 && currentHour <= 17; // ساعات العمل
-    
-    if (isPeakHour && commandStats.keys > 1000) {
-        logger.info('High load detected during peak hours, flushing command cache');
-        commandCache.flushAll();
-    }
-}
-
 // ============= معالجة الأحداث والتفاعلات =============
 
-client.on(Events.GuildCreate, async (guild) => {
+// معالجة حدث انضمام البوت لسيرفر جديد
+client.on(Events.GuildCreate, async guild => {
     try {
         // التحقق من Rate Limit لإعداد السيرفر
         const setupLimitKey = `guild_setup:${guild.id}`;
         if (!checkRateLimit(guild.id, 'setup', 1, 60000)) {
-            logger.warn(`Setup was ignored for ${guild.name} because of rate limit`);
+            logger.warn(`تم تجاهل محاولة إعداد السيرفر ${guild.name} بسبب التكرار السريع`);
             return;
         }
 
-        logger.info(`Bot added to new server: ${guild.name}`);
+        logger.info(`تم إضافة البوت إلى سيرفر جديد: ${guild.name}`);
         
         // التحقق من وجود إعدادات سابقة
-        const existingSettings = await retryOperation(async () => {
-            return await GuildSettings.findOne({ guildId: guild.id });
-        });
-        
+        const existingSettings = await GuildSettings.findOne({ guildId: guild.id });
         if (existingSettings && existingSettings.setupComplete) {
-            logger.info(`${guild.name} has already been set up`);
+            logger.info(`السيرفر ${guild.name} تم إعداده مسبقاً`);
             return;
         }
 
-        logger.info(`Starting setup for ${guild.name}`);
-        await setupGuild(guild, { forceReset: true, cleanExisting: false }); // استخدام دالة setupGuild مع خيارات إعادة الإعداد
+        logger.info(`بدء إعداد السيرفر ${guild.name}`);
+        await setupGuild(guild);
         
     } catch (error) {
-        logger.error(`Error setting up guild ${guild.name}:`, error);
+        logger.error(`خطأ أثناء إعداد السيرفر ${guild.name}:`, error);
         // محاولة إعادة الإعداد مرة واحدة بعد 5 ثواني في حالة الفشل
         setTimeout(async () => {
             try {
                 if (checkRateLimit(guild.id, 'setup_retry', 1, 60000)) {
-                    logger.info(`Retrying setup for ${guild.name}`);
-                    await setupGuild(guild, { forceReset: true, cleanExisting: true }); // استخدام دالة setupGuild مع خيارات إعادة الإعداد
+                    logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
+                    await setupGuild(guild);
                 }
             } catch (retryError) {
-                logger.error(`Failed to retry setup for ${guild.name}:`, retryError);
+                logger.error(`فشلت محاولة إعادة إعداد السيرفر ${guild.name}:`, retryError);
             }
         }, 5000);
     }
 });
 
 // معالجة حدث مغادرة البوت من سيرفر
-client.on(Events.GuildDelete, async (guild) => {
+client.on(Events.GuildDelete, async guild => {
+    console.log(`Bot removed from server: ${guild.name}`);
+    
     try {
-        logger.info(`Bot removed from server: ${guild.name} (ID: ${guild.id})`);
-        
-        // إرسال إشعار إلى صاحب البوت (اختياري)
-        try {
-            const botOwner = await client.users.fetch(process.env.BOT_OWNER_ID || '743432232529559684');
-            await botOwner.send(`❌ البوت تمت إزالته من سيرفر: ${guild.name} (ID: ${guild.id})`);
-        } catch (ownerMsgError) {
-            logger.error('Failed to notify bot owner:', ownerMsgError);
-        }
+        // إرسال رسالة خاصة لصاحب البوت
+        const botOwner = await client.users.fetch('743432232529559684');
+        await botOwner.send(`❌ Bot removed from server: ${guild.name}`);
 
-        // حذف بيانات السيرفر من قاعدة البيانات
-        const models = [
-            { name: 'GuildSettings', model: GuildSettings },
-            { name: 'Attendance', model: require('./models/Attendance') },
-            { name: 'Ticket', model: require('./models/Ticket') }
-            // يمكن إضافة مزيد من الموديلات هنا حسب الحاجة
-        ];
+        await retryOperation(async () => {
+            const Attendance = require('./models/Attendance');
+            await Attendance.deleteMany({ guildId: guild.id });
 
-        for (const { name, model } of models) {
-            try {
-                const result = await retryOperation(async () => {
-                    return await model.deleteMany({ guildId: guild.id });
-                });
-                logger.info(`Deleted ${result.deletedCount} ${name} records for guild ${guild.id}`);
-            } catch (deleteError) {
-                logger.error(`Error deleting ${name} records:`, deleteError);
-            }
-        }
+            const Ticket = require('./models/Ticket');
+            await Ticket.deleteMany({ guildId: guild.id });
 
-        logger.info(`Successfully cleaned up all data for server ${guild.name}`);
+            console.log(`Successfully deleted all data for server ${guild.name}`);
+        }, 5);
+
     } catch (error) {
-        logger.error(`Error in GuildDelete event for ${guild?.name || 'unknown guild'}:`, error);
+        console.error(`Error cleaning up after guild delete for ${guild.name}:`, error);
+        
+        try {
+            const Attendance = require('./models/Attendance');
+            await Attendance.deleteMany({ guildId: guild.id })
+                .catch(err => console.error('Error deleting attendance records:', err));
+
+            const Ticket = require('./models/Ticket');
+            await Ticket.deleteMany({ guildId: guild.id })
+                .catch(err => console.error('Error deleting tickets:', err));
+
+        } catch (secondError) {
+            console.error('Final error in cleanup:', secondError);
+        }
     }
 });
 
-// معالجة حدث تحديث إعدادات السيرفر
+// معالجة حدث تحديث السيرفر
+const { updateBotPresence } = require('./utils/botPresence.js');
 client.on(Events.GuildUpdate, async (oldGuild, newGuild) => {
     try {
-        logger.info(`Guild updated: ${newGuild.name} (ID: ${newGuild.id})`);
-        
-        // تحديث معلومات السيرفر في قاعدة البيانات باستخدام الطريقة الآمنة
+        // تحديث إعدادات السيرفر في قاعدة البيانات
         await retryOperation(async () => {
-            return await GuildSettings.updateGuildInfo(newGuild.id, {
-                name: newGuild.name,
-                icon: newGuild.iconURL(),
-                memberCount: newGuild.memberCount,
-                updatedAt: new Date()
+            const settings = await GuildSettings.findOneAndUpdate(
+                { guildId: newGuild.id },
+                {
+                    $set: {
+                        name: newGuild.name,
+                        icon: newGuild.icon,
+                        memberCount: newGuild.memberCount,
+                        updatedAt: new Date()
+                    }
+                },
+                { upsert: true, new: true }
+            );
+            
+            logger.info('تم تحديث إعدادات السيرفر', {
+                guildId: newGuild.id,
+                guildName: newGuild.name,
+                memberCount: newGuild.memberCount
             });
+            
+            // تحديث حالة البوت لعكس التغييرات
+            await updateBotPresence(client);
         });
-        
-        logger.info(`Updated guild settings for ${newGuild.name}`, {
+    } catch (error) {
+        logger.error('خطأ في تحديث إعدادات السيرفر:', {
             guildId: newGuild.id,
-            updatedFields: ['name', 'icon', 'memberCount', 'updatedAt']
+            error: error.message,
+            stack: error.stack
         });
-        
-        // التحقق من القنوات والأدوار المهمة
-        await checkCriticalChannelsAndRoles(newGuild);
-        
-    } catch (error) {
-        logger.error(`Error in GuildUpdate event for ${newGuild?.name || 'unknown guild'}:`, error);
     }
 });
 
-// معالجة حدث حذف القنوات
-client.on(Events.ChannelDelete, async (channel) => {
+// معالجة حدث إضافة عضو جديد
+client.on(Events.GuildMemberAdd, async member => {
     try {
-        // التحقق فقط من قنوات السيرفر
-        if (!channel.guild) return;
-        
-        const guild = channel.guild;
-        const channelName = channel.name;
-        
-        // قائمة أسماء القنوات المهمة للبوت
-        const criticalChannels = ['سجل-التذاكر', 'سجل-الحضور', 'طلب-تذكرة', 'تسجيل-الحضور'];
-        
-        if (criticalChannels.includes(channelName)) {
-            logger.warn(`Critical channel deleted: ${channelName} in guild ${guild.name}`);
-            
-            // تحديث إعدادات السيرفر في قاعدة البيانات
-            const guildSettings = await retryOperation(async () => {
-                return await GuildSettings.findOne({ guildId: guild.id });
-            });
-            
-            if (guildSettings) {
-                // تحديث الإعدادات بناءً على القناة المحذوفة
-                switch (channelName) {
-                    case 'سجل-التذاكر':
-                        if (guildSettings.features.tickets.logChannelId === channel.id) {
-                            guildSettings.features.tickets.logChannelId = null;
-                        }
-                        break;
-                    case 'سجل-الحضور':
-                        if (guildSettings.logsChannelId === channel.id) {
-                            guildSettings.logsChannelId = null;
-                        }
-                        break;
-                    case 'طلب-تذكرة':
-                        if (guildSettings.features.tickets.channelId === channel.id) {
-                            guildSettings.features.tickets.channelId = null;
-                        }
-                        break;
-                    case 'تسجيل-الحضور':
-                        if (guildSettings.features.attendance?.channelId === channel.id) {
-                            guildSettings.features.attendance.channelId = null;
-                        }
-                        break;
-                }
-                
-                await retryOperation(async () => {
-                    return await guildSettings.save();
-                });
-                logger.info(`Updated guild settings after channel deletion: ${channelName}`);
-                
-                // إشعار المشرفين
-                try {
-                    const systemChannel = guild.systemChannel;
-                    if (systemChannel && systemChannel.viewable) {
-                        await systemChannel.send({
-                            content: `⚠️ تنبيه: تم حذف قناة مهمة (${channelName}). يرجى استخدام أمر \`/setup\` لإعادة تكوين النظام.`
-                        });
-                        
-                        // محاولة إعادة تسمية القناة (اختياري - إذا كان لدى البوت صلاحيات)
-                        try {
-                            await newChannel.setName(oldChannel.name, 'استعادة اسم قناة مهمة للبوت');
-                            await systemChannel.send({
-                                content: `✅ تمت إعادة تسمية القناة إلى "${oldChannel.name}" للحفاظ على وظائف البوت.`
-                            });
-                        } catch (renameError) {
-                            logger.error(`Cannot rename channel back to ${oldChannel.name}:`, renameError);
-                        }
+        const welcomeChannel = member.guild.channels.cache.find(ch => ch.name === '👋〡・الترحيب');
+        if (!welcomeChannel) return;
+
+        // إنشاء رسالة الترحيب
+        await welcomeChannel.send({
+            embeds: [{
+                title: '👋 عضو جديد!',
+                description: `مرحباً ${member} في ${member.guild.name}!`,
+                fields: [
+                    {
+                        name: '🎉 أنت العضو رقم',
+                        value: `${member.guild.memberCount}`
+                    },
+                    {
+                        name: '📅 تاريخ الانضمام',
+                        value: member.joinedAt.toLocaleDateString('en-GB', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric'
+                        })
                     }
-                } catch (notifyError) {
-                    logger.error('Error sending notification about deleted channel:', notifyError);
+                ],
+                color: 0x00ff00,
+                thumbnail: {
+                    url: member.user.displayAvatarURL({ dynamic: true })
+                },
+                timestamp: new Date(),
+                footer: {
+                    text: `ID: ${member.user.id}`
                 }
-            }
-        }
-    } catch (error) {
-        logger.error('Error handling ChannelDelete event:', error);
-    }
-});
-
-// معالجة حدث حذف الأدوار
-client.on(Events.RoleDelete, async (role) => {
-    try {
-        const guild = role.guild;
-        
-        // التحقق من إعدادات السيرفر
-        const guildSettings = await retryOperation(async () => {
-            return await GuildSettings.findOne({ guildId: guild.id });
+            }]
         });
-        
-        if (guildSettings && guildSettings.attendanceRoleId === role.id) {
-            logger.warn(`Attendance role deleted in guild ${guild.name}`);
-            
-            // تحديث إعدادات السيرفر
-            guildSettings.attendanceRoleId = null;
-            await retryOperation(async () => {
-                return await guildSettings.save();
-            });
-            
-            // إشعار المشرفين
-            try {
-                const systemChannel = guild.systemChannel;
-                if (systemChannel && systemChannel.viewable) {
-                    await systemChannel.send({
-                        content: `⚠️ تنبيه: تم حذف رتبة الحضور المهمة. يرجى استخدام أمر \`/setup attendance\` لإعادة تكوين نظام الحضور.`
-                    });
-                }
-            } catch (notifyError) {
-                logger.error('Error sending notification about deleted role:', notifyError);
-            }
-        }
-    } catch (error) {
-        logger.error('Error handling RoleDelete event:', error);
-    }
-});
 
-// معالجة حدث تغيير اسم القناة
-client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
-    try {
-        // نتحقق فقط من قنوات النصوص والفئات
-        if (!oldChannel.guild || !["GUILD_TEXT", "GUILD_CATEGORY", 0, 4].includes(oldChannel.type)) return;
-        
-        // إذا لم يتغير الاسم، نتجاهل
-        if (oldChannel.name === newChannel.name) return;
-        
-        const guild = newChannel.guild;
-        
-        // قائمة القنوات المهمة التي يستخدمها البوت
-        const criticalChannels = ['سجل-التذاكر', 'سجل-الحضور', 'طلب-تذكرة', 'تسجيل-الحضور'];
-        
-        if (criticalChannels.includes(oldChannel.name)) {
-            logger.warn(`Critical channel renamed: ${oldChannel.name} to ${newChannel.name} in guild ${guild.name}`);
-            
-            // تحقق من الإعدادات
-            const guildSettings = await retryOperation(async () => {
-                return await GuildSettings.findOne({ guildId: guild.id });
-            });
-            
-            if (guildSettings) {
-                // إشعار المشرفين
-                try {
-                    const systemChannel = guild.systemChannel;
-                    if (systemChannel && systemChannel.viewable) {
-                        await systemChannel.send({
-                            content: `⚠️ تنبيه: تم تغيير اسم قناة مهمة من "${oldChannel.name}" إلى "${newChannel.name}". قد يؤثر هذا على وظائف البوت. إذا واجهت مشاكل، استخدم أمر \`/setup\` لإعادة الإعداد.`
-                        });
-                        
-                        // محاولة إعادة تسمية القناة (اختياري - إذا كان لدى البوت صلاحيات)
-                        try {
-                            await newChannel.setName(oldChannel.name, 'استعادة اسم قناة مهمة للبوت');
-                            await systemChannel.send({
-                                content: `✅ تمت إعادة تسمية القناة إلى "${oldChannel.name}" للحفاظ على وظائف البوت.`
-                            });
-                        } catch (renameError) {
-                            logger.error(`Cannot rename channel back to ${oldChannel.name}:`, renameError);
-                        }
-                    }
-                } catch (notifyError) {
-                    logger.error('Error sending notification about renamed channel:', notifyError);
-                }
-            }
-        }
     } catch (error) {
-        logger.error('Error handling ChannelUpdate event:', error);
+        console.error('Error in welcome message:', error);
     }
-});
-
-// معالجة حدث تغيير اسم الرتبة
-client.on(Events.RoleUpdate, async (oldRole, newRole) => {
-    try {
-        // نتحقق إذا تغير الاسم فقط
-        if (oldRole.name === newRole.name) return;
-        
-        const guild = newRole.guild;
-        
-        // التحقق من إعدادات السيرفر
-        const guildSettings = await retryOperation(async () => {
-            return await GuildSettings.findOne({ guildId: guild.id });
-        });
-        
-        // التحقق إذا كانت الرتبة هي رتبة الحضور أو رتبة مهمة أخرى
-        const isAttendanceRole = guildSettings && guildSettings.attendanceRoleId === newRole.id;
-        const isImportantRole = oldRole.name === 'مسجل حضوره';
-        
-        if (isAttendanceRole || isImportantRole) {
-            logger.warn(`Important role renamed: ${oldRole.name} to ${newRole.name} in guild ${guild.name}`);
-            
-            // إشعار المشرفين
-            try {
-                const systemChannel = guild.systemChannel;
-                if (systemChannel && systemChannel.viewable) {
-                    await systemChannel.send({
-                        content: `⚠️ تنبيه: تم تغيير اسم رتبة مهمة من "${oldRole.name}" إلى "${newRole.name}". قد يؤثر هذا على وظائف البوت مثل نظام الحضور.`
-                    });
-                    
-                    // محاولة إعادة تسمية الرتبة (اختياري - إذا كان لدى البوت صلاحيات)
-                    if (isImportantRole) {
-                        try {
-                            await newRole.setName(oldRole.name, 'استعادة اسم رتبة مهمة للبوت');
-                            await systemChannel.send({
-                                content: `✅ تمت إعادة تسمية الرتبة إلى "${oldRole.name}" للحفاظ على وظائف البوت.`
-                            });
-                        } catch (renameError) {
-                            logger.error(`Cannot rename role back to ${oldRole.name}:`, renameError);
-                        }
-                    }
-                }
-            } catch (notifyError) {
-                logger.error('Error sending notification about renamed role:', notifyError);
-            }
-        }
-    } catch (error) {
-        logger.error('Error handling RoleUpdate event:', error);
-    }
-});
-
-/**
- * دالة للتحقق من القنوات والأدوار المهمة وإصلاحها إذا لزم الأمر
- * @param {Guild} guild كائن السيرفر للتحقق منه
- */
-async function checkCriticalChannelsAndRoles(guild) {
-    try {
-        const guildSettings = await retryOperation(async () => {
-            return await GuildSettings.findOne({ guildId: guild.id });
-        });
-        if (!guildSettings || !guildSettings.setupComplete) return;
-        
-        let needsUpdate = false;
-        const missingComponents = [];
-        
-        // التحقق من قنوات السجلات
-        if (guildSettings.features?.tickets?.enabled && guildSettings.features.tickets.logChannelId) {
-            const ticketLogChannel = guild.channels.cache.get(guildSettings.features.tickets.logChannelId);
-            if (!ticketLogChannel) {
-                logger.warn(`Ticket log channel missing in guild ${guild.name}`);
-                missingComponents.push('قناة سجل التذاكر');
-                needsUpdate = true;
-            }
-        }
-        
-        if (guildSettings.logsChannelId) {
-            const attendanceLogChannel = guild.channels.cache.get(guildSettings.logsChannelId);
-            if (!attendanceLogChannel) {
-                logger.warn(`Attendance log channel missing in guild ${guild.name}`);
-                missingComponents.push('قناة سجل الحضور');
-                needsUpdate = true;
-            }
-        }
-        
-        // التحقق من رتبة الحضور
-        if (guildSettings.attendanceRoleId) {
-            const attendanceRole = guild.roles.cache.get(guildSettings.attendanceRoleId);
-            if (!attendanceRole) {
-                logger.warn(`Attendance role missing in guild ${guild.name}`);
-                missingComponents.push('رتبة الحضور');
-                needsUpdate = true;
-            }
-        }
-        
-        // إرسال إشعار إذا كانت هناك مشاكل
-        if (needsUpdate) {
-            try {
-                const systemChannel = guild.systemChannel;
-                if (systemChannel && systemChannel.viewable) {
-                    await systemChannel.send({
-                        content: `⚠️ تنبيه: تم اكتشاف مشاكل في إعدادات البوت. المكونات المفقودة: ${missingComponents.join(', ')}. يرجى استخدام أمر \`/setup all\` لإعادة تكوين البوت.`
-                    });
-                }
-            } catch (notifyError) {
-                logger.error('Error sending notification about missing channels/roles:', notifyError);
-            }
-        }
-        
-    } catch (error) {
-        logger.error(`Error checking critical channels and roles for ${guild.name}:`, error);
-    }
-}
-
-// محاولة إعادة الإعداد بعد 5 ثواني في حالة الفشل
-client.on(Events.GuildCreate, guild => {
-    setTimeout(async () => {
-        try {
-            const guildConfig = await retryOperation(async () => {
-                return await GuildSettings.findOne({ guildId: guild.id });
-            });
-            if (!guildConfig || !guildConfig.setupComplete) {
-                logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
-                await setupGuild(guild, { forceReset: true, cleanExisting: true }); // استخدام دالة setupGuild مع خيارات إعادة الإعداد
-            }
-        } catch (error) {
-            logger.error(`فشل في إعادة إعداد السيرفر ${guild.name}:`, error);
-        }
-    }, 5000);
 });
 
 // ============= دوال معالجة التذاكر والحضور =============
@@ -953,12 +623,10 @@ async function checkTicketLimits(userId, guildId) {
 
     try {
         // التحقق من التذاكر المفتوحة
-        const openTicket = await retryOperation(async () => {
-            return await Ticket.findOne({
-                userId,
-                guildId,
-                status: 'open'
-            });
+        const openTicket = await Ticket.findOne({
+            userId,
+            guildId,
+            status: 'open'
         });
 
         if (openTicket) {
@@ -970,15 +638,13 @@ async function checkTicketLimits(userId, guildId) {
         }
 
         // التحقق من عدد التذاكر اليومية
-        const dailyTickets = await retryOperation(async () => {
-            return await Ticket.countDocuments({
-                userId,
-                guildId,
-                createdAt: {
-                    $gte: today,
-                    $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
-                }
-            });
+        const dailyTickets = await Ticket.countDocuments({
+            userId,
+            guildId,
+            createdAt: {
+                $gte: today,
+                $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
+            }
         });
 
         if (dailyTickets >= 3) {
@@ -1051,14 +717,10 @@ async function handleCloseTicket(interaction) {
         }
 
         const ticketId = interaction.customId.replace('close_ticket_', '');
-        const ticket = await retryOperation(async () => {
-            return await Ticket.findOne({ ticketId: `TICKET-${ticketId}` });
-        });
+        const ticket = await Ticket.findOne({ ticketId: `TICKET-${ticketId}` });
         if (ticket) {
             ticket.status = 'closed';
-            await retryOperation(async () => {
-                return await ticket.save();
-            });
+            await ticket.save();
 
             // إزالة صلاحية رؤية القناة من صاحب التذكرة إذا لم يكن مسؤولاً
             const ticketOwner = await interaction.guild.members.fetch(ticket.userId);
@@ -1120,7 +782,7 @@ async function handleCloseTicket(interaction) {
     }
 }
 
-// دالة لحساب مدة التذكرة
+// دالة مساعدة لحساب مدة التذكرة
 function getTicketDuration(createdAt) {
     const duration = new Date() - createdAt;
     const days = Math.floor(duration / (1000 * 60 * 60 * 24));
@@ -1161,159 +823,104 @@ async function handleCheckIn(interaction) {
             ephemeral: true
         });
 
-        try {
-            // استخدام الدالة الجديدة للتحقق من السجلات
-            const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
-            
-            // متغير للاحتفاظ بحالة نجاح العملية
-            let sessionCreated = false;
-            let updatedRecord = null;
+        // استخدام الدالة الجديدة للتحقق من السجلات
+        const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
 
-            if (attendanceRecord) {
-                // التحقق من عدم وجود جلسة مفتوحة
-                const hasOpenSession = attendanceRecord.sessions.some(session => !session.checkOut);
-                if (hasOpenSession) {
-                    attendanceLocks.delete(userId);
-                    return await interaction.followUp({
-                        content: '❌ لديك جلسة حضور مفتوحة بالفعل',
-                        ephemeral: true
-                    });
-                }
-                
-                // إضافة جلسة جديدة إلى السجل الموجود
-                attendanceRecord.sessions.push({
-                    checkIn: convertToRiyadhTime(new Date()),
-                    duration: 0
+        if (!attendanceRecord) {
+            const record = new Attendance({
+                userId: interaction.user.id,
+                guildId: interaction.guild.id,
+                date: getStartOfDay(),
+                sessions: []
+            });
+
+            // إضافة جلسة جديدة
+            record.sessions.push({
+                checkIn: convertToRiyadhTime(new Date()),
+                duration: 0
+            });
+
+            await record.save().catch(err => {
+                logger.error('Error saving attendance record:', err);
+                throw new Error('فشل في حفظ سجل الحضور');
+            });
+        } else {
+            // التحقق من عدم وجود جلسة مفتوحة
+            const hasOpenSession = attendanceRecord.sessions.some(session => !session.checkOut);
+            if (hasOpenSession) {
+                return await interaction.followUp({
+                    content: '❌ لديك جلسة حضور مفتوحة بالفعل',
+                    ephemeral: true
                 });
-                
-                // حفظ التغييرات وانتظار النتيجة
-                updatedRecord = await attendanceRecord.save();
-                // التحقق من نجاح العملية من خلال وجود سجل محدث
-                sessionCreated = updatedRecord && updatedRecord.sessions && 
-                                updatedRecord.sessions.some(session => !session.checkOut);
-            } else {
-                // استخدام updateAttendance بدلاً من createAttendance لتجنب تكرار المفتاح
-                const now = convertToRiyadhTime(new Date());
-                const today = new Date(now);
-                today.setUTCHours(0, 0, 0, 0);
-                
-                updatedRecord = await retryOperation(async () => {
-                    return await Attendance.updateAttendance(
-                        interaction.user.id,
-                        interaction.guild.id,
-                        today,
-                        {
-                            checkIn: now,
-                            duration: 0
-                        }
-                    );
-                });
-                
-                // التحقق من نجاح العملية من خلال وجود سجل محدث
-                sessionCreated = updatedRecord && updatedRecord.sessions && 
-                                updatedRecord.sessions.some(session => !session.checkOut);
             }
-            
-            // التحقق من نجاح تسجيل الحضور قبل إرسال رسالة النجاح
-            if (sessionCreated) {
-                // تحديث التخزين المؤقت
-                cacheUserAttendance(userId, interaction.guild.id, updatedRecord);
-                
-                // إرسال رسالة النجاح للمستخدم
-                await interaction.followUp({
-                    content: '✅ تم تسجيل حضورك بنجاح!',
-                    ephemeral: true
-                });
-                
-                // تسجيل حدث نجاح تسجيل الحضور
-                logger.info(`User ${interaction.user.tag} (${userId}) checked in at ${new Date().toISOString()}`);
-                
-                // إعداد وإرسال رسالة في قناة سجل الحضور
-                setupAttendanceLogMessage(interaction.guild.id, interaction, 'حضور');
-                
-                // إضافة رتبة الحضور
-                try {
-                    const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
-                    if (attendanceRole) {
-                        await interaction.member.roles.add(attendanceRole);
-                    }
-                } catch (roleError) {
-                    logger.warn(`فشل إضافة رتبة الحضور للمستخدم ${userId}:`, roleError);
-                }
 
-                // تسجيل في قناة السجلات
-                try {
-                    const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
-                    if (logChannel) {
-                        await logChannel.send({
-                            embeds: [{
-                                title: '✅ تسجيل حضور',
-                                description: `${interaction.user} سجل حضوره`,
-                                fields: [{
-                                    name: 'وقت الحضور',
-                                    value: formatTimeInRiyadh(new Date())
-                                }],
-                                color: 0x00ff00,
-                                timestamp: new Date()
-                            }]
-                        });
-                    }
-                } catch (channelError) {
-                    logger.warn(`فشل إرسال رسالة لقناة سجل الحضور للمستخدم ${userId}:`, channelError);
-                }
+            // إضافة جلسة جديدة
+            attendanceRecord.sessions.push({
+                checkIn: convertToRiyadhTime(new Date()),
+                duration: 0
+            });
 
-                // إضافة نقاط الحضور
-                let pointsResult = null;
-                try {
-                    if (PointsManager && PointsManager.POINTS_CONFIG && PointsManager.POINTS_CONFIG.ATTENDANCE) {
-                        pointsResult = await PointsManager.addPoints(
-                            interaction.user.id,
-                            interaction.guild.id,
-                            PointsManager.POINTS_CONFIG.ATTENDANCE.CHECK_IN,
-                            'تسجيل حضور'
-                        );
-                    }
-                } catch (pointsError) {
-                    logger.warn(`فشل إضافة نقاط للمستخدم ${userId}:`, pointsError);
-                }
+            await attendanceRecord.save().catch(err => {
+                logger.error('Error saving attendance record:', err);
+                throw new Error('فشل في حفظ سجل الحضور');
+            });
+        }
 
-                // تحديث الرد ليشمل النقاط
-                let replyContent = '✅ تم تسجيل حضورك بنجاح!';
-                if (pointsResult && pointsResult.leveledUp) {
-                    replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
-                }
+        // إضافة رتبة الحضور
+        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        if (attendanceRole) {
+            await interaction.member.roles.add(attendanceRole);
+        }
 
-                // إرسال رسالة النجاح النهائية للمستخدم
-                await interaction.followUp({
-                    content: replyContent,
-                    ephemeral: true
-                });
-                
-            } else {
-                // إذا فشلت عملية تسجيل الحضور
-                attendanceLocks.delete(userId);
-                await interaction.followUp({
-                    content: '❌ حدث خطأ في تسجيل الحضور: لم يتم إنشاء جلسة',
-                    ephemeral: true
-                });
-                logger.error(`Failed to create attendance session for user ${userId} in guild ${interaction.guild.id}`);
-            }
-        } catch (error) {
-            logger.error('Error creating attendance record:', error);
+        // تسجيل في قناة السجلات
+        const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        if (logChannel) {
+            await logChannel.send({
+                embeds: [{
+                    title: '✅ تسجيل حضور',
+                    description: `${interaction.user} سجل حضوره`,
+                    fields: [{
+                        name: 'وقت الحضور',
+                        value: formatTimeInRiyadh(new Date())
+                    }],
+                    color: 0x00ff00,
+                    timestamp: new Date()
+                }]
+            });
+        }
+
+        // إضافة نقاط الحضور
+        if (PointsManager && PointsManager.POINTS_CONFIG && PointsManager.POINTS_CONFIG.ATTENDANCE) {
+            const pointsResult = await PointsManager.addPoints(
+                interaction.user.id,
+                interaction.guild.id,
+                PointsManager.POINTS_CONFIG.ATTENDANCE.CHECK_IN,
+                'تسجيل حضور'
+            );
+
+            // تحديث الرد ليشمل النقاط
+            let replyContent = '✅ تم تسجيل حضورك بنجاح';
+            if (pointsResult.leveledUp) {
+                replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
+            };
+
             await interaction.followUp({
-                content: `❌ حدث خطأ في تسجيل الحضور: ${error.message}`,
+                content: replyContent,
                 ephemeral: true
             });
-        } finally {
-            // إزالة القفل بعد الانتهاء من العملية
-            attendanceLocks.delete(userId);
+        } else {
+            throw new Error('نظام النقاط غير معرف بشكل صحيح.');
         }
+
     } catch (error) {
         logger.error('Error in check-in:', error);
         await interaction.followUp({
             content: '❌ حدث خطأ أثناء تسجيل الحضور',
             ephemeral: true
         });
+    } finally {
+        // إزالة القفل بعد الانتهاء
+        attendanceLocks.delete(userId);
     }
 }
 
@@ -1342,9 +949,6 @@ function formatSessionDuration(checkIn, checkOut) {
 
 // تحديث دالة تسجيل الانصراف
 async function handleCheckOut(interaction) {
-    const userId = interaction.user.id;
-    const guildId = interaction.guild.id;
-    
     try {
         // إرسال رد فوري للمستخدم
         await interaction.reply({
@@ -1352,218 +956,117 @@ async function handleCheckOut(interaction) {
             ephemeral: true
         });
 
-        // البحث عن سجل الحضور
-        const { attendanceRecord } = await checkAttendanceAndLeave(userId, guildId);
-        
-        // تسجيل معلومات إضافية للتشخيص
-        logger.info(`محاولة تسجيل انصراف: المستخدم ${userId} في السيرفر ${guildId}. تم العثور على سجل: ${!!attendanceRecord}`);
-        
-        // التحقق من وجود سجل الحضور
-        if (!attendanceRecord) {
-            // البحث عن آخر سجل تم إنشاؤه اليوم بغض النظر عن تفاصيله
-            const today = new Date();
-            today.setUTCHours(0, 0, 0, 0);
-            const tomorrow = new Date(today);
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            
-            // محاولة البحث مباشرة في قاعدة البيانات
-            const allRecordsToday = await Attendance.find({ 
-                userId, 
-                guildId,
-                date: { $gte: today, $lt: tomorrow }
-            });
-            
-            if (allRecordsToday && allRecordsToday.length > 0) {
-                logger.info(`تم العثور على ${allRecordsToday.length} سجل حضور لليوم الحالي للمستخدم ${userId}`);
-                
-                // البحث عن آخر سجل له جلسة مفتوحة
-                const recordWithOpenSession = allRecordsToday.find(record => 
-                    record.sessions && record.sessions.length > 0 && 
-                    record.sessions.some(session => !session.checkOut)
-                );
-                
-                if (recordWithOpenSession) {
-                    logger.info(`تم العثور على سجل بجلسة مفتوحة للمستخدم ${userId}`);
-                    
-                    // استخدام السجل الذي تم العثور عليه
-                    const openSession = recordWithOpenSession.sessions.find(session => !session.checkOut);
-                    
-                    // تحديث وقت الانصراف
-                    openSession.checkOut = convertToRiyadhTime(new Date());
-                    openSession.duration = Math.round((openSession.checkOut - openSession.checkIn) / 1000 / 60);
-                    
-                    // حفظ التحديث
-                    await recordWithOpenSession.save();
-                    
-                    // إكمال عملية تسجيل الانصراف
-                    await completeCheckOut(interaction, recordWithOpenSession, openSession);
-                    return;
-                } else {
-                    logger.warn(`تم العثور على سجلات حضور ولكن بدون جلسة مفتوحة للمستخدم ${userId}`);
-                }
-            }
-            
+        const { attendanceRecord } = await checkAttendanceAndLeave(interaction.user.id, interaction.guild.id);
+
+        if (!attendanceRecord || !attendanceRecord.sessions.length) {
             return await interaction.followUp({
-                content: '❌ لم يتم العثور على جلسة حضور مفتوحة. هل قمت بتسجيل الحضور اليوم؟',
+                content: '❌ لم يتم العثور على جلسة حضور مفتوحة',
                 ephemeral: true
             });
         }
 
-        // التحقق من وجود جلسات في السجل
-        if (!attendanceRecord.sessions || attendanceRecord.sessions.length === 0) {
-            logger.warn(`تم العثور على سجل حضور بدون جلسات للمستخدم ${userId}`);
-            return await interaction.followUp({
-                content: '❌ لم يتم العثور على جلسات حضور في السجل. يرجى تسجيل الحضور أولاً.',
-                ephemeral: true
-            });
-        }
-
-        // البحث عن آخر جلسة مفتوحة
         const lastSession = attendanceRecord.sessions[attendanceRecord.sessions.length - 1];
-        
-        // إذا كانت آخر جلسة مغلقة، البحث عن أي جلسة مفتوحة
         if (lastSession.checkOut) {
-            const openSession = attendanceRecord.sessions.find(session => !session.checkOut);
-            
-            if (openSession) {
-                // تحديث وقت الانصراف للجلسة المفتوحة
-                openSession.checkOut = convertToRiyadhTime(new Date());
-                openSession.duration = Math.round((openSession.checkOut - openSession.checkIn) / 1000 / 60);
-                
-                await retryOperation(async () => {
-                    return await attendanceRecord.save();
-                });
-                
-                await completeCheckOut(interaction, attendanceRecord, openSession);
-                return;
-            }
-            
             return await interaction.followUp({
-                content: '❌ ليس لديك جلسة حضور مفتوحة. تم إغلاق جميع الجلسات سابقاً.',
+                content: '❌ ليس لديك جلسة حضور مفتوحة',
                 ephemeral: true
             });
         }
 
-        // تحديث وقت الانصراف بتوقيت الرياض
+        // تحديث وقت الانصراف بتوقيت مكة
         lastSession.checkOut = convertToRiyadhTime(new Date());
+        const duration = formatSessionDuration(lastSession.checkIn, lastSession.checkOut);
         lastSession.duration = Math.round((lastSession.checkOut - lastSession.checkIn) / 1000 / 60);
 
-        // حفظ التحديثات على السجل
-        await retryOperation(async () => {
-            return await attendanceRecord.save();
-        });
+        await attendanceRecord.save();
 
-        // إكمال عملية تسجيل الانصراف
-        await completeCheckOut(interaction, attendanceRecord, lastSession);
-
-    } catch (error) {
-        logger.error('Error in check-out:', error);
-        await interaction.followUp({
-            content: `❌ حدث خطأ أثناء تسجيل الانصراف: ${error.message}`,
-            ephemeral: true
-        });
-    }
-}
-
-// دالة مساعدة لإكمال عملية تسجيل الانصراف
-async function completeCheckOut(interaction, attendanceRecord, session) {
-    try {
         // تحديث تحليل الأداء
         await PerformanceAnalyzer.updateUserPerformance(
             interaction.user.id,
             interaction.guild.id
         );
 
-        // إزالة رتبة الحضور
-        try {
-            const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
-            if (attendanceRole) {
-                await interaction.member.roles.remove(attendanceRole);
-            }
-        } catch (roleError) {
-            logger.warn(`فشل إزالة رتبة الحضور للمستخدم ${interaction.user.id}:`, roleError);
+        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        if (attendanceRole) {
+            await interaction.member.roles.remove(attendanceRole);
         }
 
-        // حساب مدة الجلسة
-        const duration = formatSessionDuration(session.checkIn, session.checkOut);
-        
         // تسجيل في قناة السجلات
-        try {
-            const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
-            if (logChannel) {
-                const checkInTime = formatTimeInRiyadh(session.checkIn);
-                const checkOutTime = formatTimeInRiyadh(session.checkOut);
+        const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        if (logChannel) {
+            const checkInTime = formatTimeInRiyadh(lastSession.checkIn);
+            const checkOutTime = formatTimeInRiyadh(lastSession.checkOut);
 
-                await logChannel.send({
-                    embeds: [{
-                        title: '⏹️ تسجيل انصراف',
-                        description: `${interaction.user} سجل انصرافه`,
-                        fields: [
-                            {
-                                name: 'وقت الحضور',
-                                value: checkInTime,
-                                inline: true
-                            },
-                            {
-                                name: 'وقت الانصراف',
-                                value: checkOutTime,
-                                inline: true
-                            },
-                            {
-                                name: 'المدة',
-                                value: duration,
-                                inline: true
-                            }
-                        ],
-                        color: 0xff0000,
-                        timestamp: new Date()
-                    }]
-                });
-            }
-        } catch (channelError) {
-            logger.warn(`فشل إرسال رسالة لقناة سجل الانصراف للمستخدم ${interaction.user.id}:`, channelError);
-        }
-
-        // إضافة نقاط الحضور
-        let pointsResult = null;
-        try {
-            if (PointsManager && PointsManager.POINTS_CONFIG && PointsManager.POINTS_CONFIG.ATTENDANCE) {
-                pointsResult = await PointsManager.addPoints(
-                    interaction.user.id,
-                    interaction.guild.id,
-                    PointsManager.POINTS_CONFIG.ATTENDANCE.FULL_DAY,
-                    'إكمال يوم كامل'
-                );
-            }
-        } catch (pointsError) {
-            logger.warn(`فشل إضافة نقاط للمستخدم ${interaction.user.id}:`, pointsError);
-        }
-
-        // إرسال رسالة التأكيد النهائية
-        let replyContent = `✅ تم تسجيل انصرافك بنجاح!\nمدة الجلسة: ${duration}`;
-        if (pointsResult && pointsResult.leveledUp) {
-            replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
-        } else if (pointsResult) {
-            replyContent += `\n✨ تم إضافة ${PointsManager.POINTS_CONFIG.ATTENDANCE.FULL_DAY} نقطة لحسابك!`;
+            await logChannel.send({
+                embeds: [{
+                    title: '⏹️ تسجيل انصراف',
+                    description: `${interaction.user} سجل انصرافه`,
+                    fields: [
+                        {
+                            name: 'وقت الحضور',
+                            value: checkInTime,
+                            inline: true
+                        },
+                        {
+                            name: 'وقت الانصراف',
+                            value: checkOutTime,
+                            inline: true
+                        },
+                        {
+                            name: 'المدة',
+                            value: duration,
+                            inline: true
+                        }
+                    ],
+                    color: 0xff0000,
+                    timestamp: new Date()
+                }]
+            });
         }
 
         await interaction.followUp({
             embeds: [{
-                title: '✅ تم تسجيل انصرافك بنجاح',
-                description: replyContent,
+                title: '✅ تم تسجيل انصرافك',
+                description: `مدة الجلسة: ${duration}`,
                 color: 0x00ff00,
                 timestamp: new Date()
             }],
             ephemeral: true
         });
-        
-        // تحديث سجل الحضور في الذاكرة المؤقتة
-        cacheUserAttendance(interaction.user.id, interaction.guild.id, attendanceRecord);
-        
+
     } catch (error) {
-        logger.error('Error completing check-out process:', error);
-        throw error;
+        logger.error('Error in check-out:', error);
+        await interaction.followUp({
+            content: '❌ حدث خطأ أثناء تسجيل الانصراف',
+            ephemeral: true
+        });
     }
+}
+
+// تحديث دالة حساب مدة الجلسة
+function formatSessionDuration(checkIn, checkOut) {
+    const duration = moment(checkOut).diff(moment(checkIn));
+    const minutes = Math.floor(duration / 1000 / 60);
+    
+    if (minutes < 1) {
+        return "أقل من دقيقة";
+    }
+    
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    
+    let durationText = [];
+    
+    if (hours > 0) {
+        durationText.push(formatArabicTime(hours, 'ساعة', 'ساعتان', 'ساعات'));
+    }
+    
+    if (remainingMinutes > 0) {
+        if (durationText.length > 0) durationText.push('و');
+        durationText.push(formatArabicTime(remainingMinutes, 'دقيقة', 'دقيقتان', 'دقائق'));
+    }
+    
+    return durationText.join(' ');
 }
 
 // =============== الدوال المساعدة ==================
@@ -1592,7 +1095,7 @@ function splitMessage(message, limit = 1024) {
 async function handleInteractionError(interaction, error, context = {}) {
     try {
         const errorMessage = {
-            content: '❌ عذراً، حدث خطأ أثناء معالجة طلبك. الرجاء المحاولة مرة أخرى.',
+            content: '❌ عذراً، حدث خطأ أثناء معالجة طلبك. الرجاء المحاولة مرة أخرى لاحقاً.',
             ephemeral: true
         };
 
@@ -1641,7 +1144,7 @@ async function handleInteractionError(interaction, error, context = {}) {
     }
 }
 
-// دالة تنظيف الذاكرة المؤقتة
+// دالة لتنظيف الذاكرة المؤقتة
 function cleanupCache() {
     const now = Date.now();
     
@@ -1696,7 +1199,16 @@ async function setupBot() {
         await updateBotStatus();
         setupDailyReset(client);
         setInterval(cleanupCache, 3600000);
-        setInterval(() => updateBotPresence(client), 3600000);
+        setInterval(async () => {
+            if (!client.isReady()) {
+                console.log('Bot disconnected. Attempting to reconnect...');
+                try {
+                    await client.login(process.env.DISCORD_TOKEN);
+                } catch (error) {
+                    console.error('Failed to reconnect:', error);
+                }
+            }
+        }, 300000);
 
         console.log('Bot setup completed successfully');
     } catch (error) {
@@ -1804,8 +1316,8 @@ async function createDiscordChannel(guild, options) {
 // ============= تحسينات الأمان =============
 
 // حماية من التكرار المفرط للطلبات
-const expressRateLimit = require('express-rate-limit');
-const limiter = expressRateLimit({
+const rateLimit = require('express-rate-limit');
+const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 دقيقة
     max: 100, // حد أقصى 100 طلب
     message: 'تم تجاوز الحد المسموح من الطلبات. الرجاء المحاولة لاحقاً.',
@@ -2019,7 +1531,7 @@ async function deployCommands(client) {
             console.log('Using alternate method to load commands...');
             const commandsPath = path.join(__dirname, 'commands');
             const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-
+            
             for (const file of commandFiles) {
                 const filePath = path.join(commandsPath, file);
                 try {
@@ -2064,6 +1576,58 @@ client.once('ready', async () => {
     } catch (error) {
         console.error('Error in ready event:', error);
     }
+});
+
+client.on(Events.GuildCreate, async (guild) => {
+    try {
+        // التحقق من Rate Limit لإعداد السيرفر
+        const setupLimitKey = `guild_setup:${guild.id}`;
+        if (!checkRateLimit(guild.id, 'setup', 1, 60000)) {
+            logger.warn(`Setup was ignored for ${guild.name} because of rate limit`);
+            return;
+        }
+
+        logger.info(`Bot added to new server: ${guild.name}`);
+        
+        // التحقق من وجود إعدادات سابقة
+        const existingSettings = await GuildSettings.findOne({ guildId: guild.id });
+        if (existingSettings && existingSettings.setupComplete) {
+            logger.info(`${guild.name} has already been set up`);
+            return;
+        }
+
+        logger.info(`Starting setup for ${guild.name}`);
+        await setupGuild(guild);
+        
+    } catch (error) {
+        logger.error(`Error setting up guild ${guild.name}:`, error);
+        // محاولة إعادة الإعداد مرة واحدة بعد 5 ثواني في حالة الفشل
+        setTimeout(async () => {
+            try {
+                if (checkRateLimit(guild.id, 'setup_retry', 1, 60000)) {
+                    logger.info(`Retrying setup for ${guild.name}`);
+                    await setupGuild(guild);
+                }
+            } catch (retryError) {
+                logger.error(`Failed to retry setup for ${guild.name}:`, retryError);
+            }
+        }, 5000);
+    }
+});
+
+// محاولة إعادة الإعداد بعد 5 ثواني في حالة الفشل
+client.on(Events.GuildCreate, guild => {
+    setTimeout(async () => {
+        try {
+            const guildConfig = await GuildSettings.findOne({ guildId: guild.id });
+            if (!guildConfig || !guildConfig.setupComplete) {
+                logger.info(`محاولة إعادة إعداد السيرفر ${guild.name}`);
+                await setupGuild(guild);
+            }
+        } catch (error) {
+            logger.error(`فشل في إعادة إعداد السيرفر ${guild.name}:`, error);
+        }
+    }, 5000);
 });
 
 // دالة فحص الغياب وإنشاء التقرير
@@ -2332,18 +1896,8 @@ async function generateDailyAttendanceLog(guild) {
         reportText = sortedUsers.map(([, stats], index) => {
             const hours = Math.floor(stats.totalMinutes / 60);
             const minutes = stats.totalMinutes % 60;
-            
-            let timeText = [];
-            if (hours > 0) {
-                timeText.push(formatArabicTime(hours, 'ساعة', 'ساعتان', 'ساعات'));
-            }
-            if (minutes > 0) {
-                if (timeText.length > 0) timeText.push('و');
-                timeText.push(formatArabicTime(minutes, 'دقيقة', 'دقيقتان', 'دقائق'));
-            }
-            
             return `**${index + 1}.** ${stats.username}\n` +
-                `⏰ المدة: ${timeText.join(' ') || 'لا يوجد'}\n` +
+                `⏰ المدة: ${hours}:${minutes.toString().padStart(2, '0')} ساعة\n` +
                 `📊 عدد الجلسات: ${stats.sessions}\n` +
                 `🕐 أول حضور: ${stats.earliestCheckIn ? formatTimeInRiyadh(stats.earliestCheckIn) : 'غير متوفر'}\n` +
                 `🕐 آخر انصراف: ${stats.latestCheckOut ? formatTimeInRiyadh(stats.latestCheckOut) : 'غير متوفر'}\n`;
@@ -2418,7 +1972,7 @@ async function checkAttendanceAndLeave(userId, guildId) {
     return { attendanceRecord, leaveRecord };
 }
 
-client.on(Events.InteractionCreate, async (interaction) => {
+client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit()) {
         if (interaction.customId === 'ticket_modal') {
             const content = interaction.fields.getTextInputValue('ticket_content');
@@ -2462,9 +2016,7 @@ async function handleDeleteTicket(interaction) {
             throw new Error('معرف التذكرة غير صالح');
         }
 
-        const ticket = await retryOperation(async () => {
-            return await Ticket.findOne({ ticketId: `TICKET-${ticketId}` });
-        });
+        const ticket = await Ticket.findOne({ ticketId: `TICKET-${ticketId}` });
         if (!ticket) {
             await interaction.editReply({
                 content: '❌ لم يتم العثور على التذكرة في قاعدة البيانات',
@@ -2485,7 +2037,7 @@ async function handleDeleteTicket(interaction) {
             if (logChannel) {
                 const logEmbed = new EmbedBuilder()
                     .setTitle('🗑️ حذف تذكرة')
-                    .setDescription(`تم حذف التذكرة #${ticket.ticketNumber} بواسطة ${interaction.user}`)
+                    .setDescription(`تم حذف التذكرة بواسطة ${interaction.user}`)
                     .addFields([
                         { name: 'معرف التذكرة', value: ticket.ticketId, inline: true },
                         { name: 'صاحب التذكرة', value: `<@${ticket.userId}>`, inline: true },
@@ -2505,9 +2057,7 @@ async function handleDeleteTicket(interaction) {
         // حذف القناة وتحديث قاعدة البيانات
         try {
             await channel.delete();
-            await retryOperation(async () => {
-                return await ticket.deleteOne();
-            });
+            await ticket.deleteOne();
             
             await interaction.editReply({
                 content: '✅ تم حذف التذكرة والقناة بنجاح',
@@ -2578,8 +2128,7 @@ async function cleanupOldLogs() {
                     age: Math.floor(fileAge),
                     deletedAt: new Date().toISOString()
                 });
-            }
-            else if (fileAge > 7) {
+            } else if (fileAge > 7) {
                 const archiveFileName = `archive-${new Date().toISOString().split('T')[0]}.log`;
                 const archivePath = path.join(logsDir, archiveFileName);
                 
@@ -2792,6 +2341,15 @@ async function generateWeeklyAttendanceLog(guild) {
 // إعداد وظائف الكرون
 setupDailyReset(client);
 
+// دالة لتنسيق الأرقام والوقت بالعربية
+function formatArabicTime(number, singular, dual, plural) {
+    if (number === 0) return '';
+    if (number === 1) return `${singular} واحدة`;
+    if (number === 2) return `${dual}`;
+    if (number >= 3 && number <= 10) return `${number} ${plural}`;
+    return `${number} ${singular}`;
+}
+
 // ============= معالجة الأخطاء العامة =============
 process.on('unhandledRejection', (error) => {
     logger.error('خطأ غير معالج (Unhandled Rejection):', {
@@ -2811,94 +2369,3 @@ process.on('uncaughtException', (error) => {
     // إعادة تشغيل البوت في حالة الأخطاء الحرجة
     process.exit(1);
 });
-
-/**
- * إنشاء قناة تذكرة جديدة
- * @param {Interaction} interaction - تفاعل المستخدم
- * @param {string} content - محتوى التذكرة
- * @returns {Promise<TextChannel>} - قناة التذكرة المنشأة
- */
-async function createTicketChannel(interaction, content) {
-    try {
-        const { guild, user } = interaction;
-        
-        // الحصول على إعدادات السيرفر
-        const guildSettings = await retryOperation(async () => {
-            return await GuildSettings.findOne({ guildId: guild.id });
-        });
-        
-        if (!guildSettings || !guildSettings.features?.tickets?.enabled) {
-            throw new Error('نظام التذاكر غير مفعل في هذا السيرفر');
-        }
-        
-        // إنشاء اسم للقناة
-        const channelName = `ticket-${user.username}`;
-        
-        // إنشاء القناة
-        const ticketChannel = await guild.channels.create({
-            name: channelName,
-            type: ChannelType.GuildText,
-            parent: guildSettings.features.tickets.categoryId,
-            permissionOverwrites: [
-                {
-                    id: guild.id,
-                    deny: [PermissionFlagsBits.ViewChannel]
-                },
-                {
-                    id: user.id,
-                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-                },
-                {
-                    id: interaction.client.user.id,
-                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels]
-                }
-            ]
-        });
-        
-        // إنشاء زر إغلاق التذكرة
-        const closeButton = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`close_ticket_${ticketChannel.id}`)
-                    .setLabel('إغلاق التذكرة')
-                    .setStyle(ButtonStyle.Danger)
-                    .setEmoji('🔒')
-            );
-        
-        // إرسال رسالة ترحيبية
-        await ticketChannel.send({
-            content: `مرحباً <@${user.id}>! تم إنشاء تذكرتك. سيقوم فريق الإدارة بالرد عليك قريباً.`,
-            components: [closeButton]
-        });
-        
-        // حفظ التذكرة في قاعدة البيانات
-        const ticket = new Ticket({
-            guildId: guild.id,
-            userId: user.id,
-            channelId: ticketChannel.id,
-            ticketId: ticketChannel.id,
-            content: content,
-            status: 'open',
-            createdAt: new Date()
-        });
-        
-        await retryOperation(async () => {
-            await ticket.save();
-        });
-        
-        // تسجيل إنشاء التذكرة
-        logger.info(`تم إنشاء تذكرة جديدة`, {
-            guildId: guild.id,
-            userId: user.id,
-            channelId: ticketChannel.id
-        });
-        
-        return ticketChannel;
-    } catch (error) {
-        logger.error('خطأ في إنشاء قناة التذكرة:', {
-            error: error.message,
-            stack: error.stack
-        });
-        throw error;
-    }
-}

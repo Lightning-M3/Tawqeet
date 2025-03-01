@@ -4,8 +4,8 @@ const path = require('node:path');
 require('dotenv').config();
 
 // التحقق من المتغيرات البيئية
-if (!process.env.TOKEN || !process.env.DISCORD_CLIENT_ID) {
-    console.error('❌ يجب توفير TOKEN و DISCORD_CLIENT_ID في ملف .env');
+if (!process.env.DISCORD_TOKEN || !process.env.DISCORD_CLIENT_ID) {
+    console.error('❌ يجب توفير DISCORD_TOKEN و DISCORD_CLIENT_ID في ملف .env');
     process.exit(1);
 }
 
@@ -27,7 +27,7 @@ for (const file of commandFiles) {
     }
 }
 
-const rest = new REST().setToken(process.env.TOKEN);
+const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
 (async () => {
     try {

@@ -32,41 +32,24 @@ async function checkBotPermissions(guild, client) {
 }
 
 // دالة لإعادة محاولة العمليات
-async function retryOperation(operation, maxRetries = 5, initialDelay = 1000, maxDelay = 10000) {
-  let delay = initialDelay;
-  
+async function retryOperation(operation, maxRetries = 5, delay = 2000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await operation();
     } catch (error) {
-      // عدم إعادة المحاولة مع أخطاء تكرار المفاتيح
-      if (error.message && error.message.includes('E11000 duplicate key error')) {
-        logger.warn('تم اكتشاف محاولة تكرار إدخال مفتاح فريد', { error: error.message });
-        // تحويل خطأ تكرار المفتاح إلى خطأ مفهوم وشرح ما حدث
-        throw new Error('هذا السجل موجود بالفعل في قاعدة البيانات');
-      }
-      
       if (i === maxRetries - 1) throw error;
       
       logger.warn(`Retry attempt ${i + 1}/${maxRetries}`, { error: error.message });
       
-      // انتظار مع زيادة أسية محدودة
-      await new Promise(resolve => setTimeout(resolve, Math.min(delay, maxDelay)));
-      delay = Math.min(delay * 1.5, maxDelay);
+      // انتظار متزايد بين المحاولات
+      await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
       
-      // التحقق من حالة الاتصال فقط إذا كانت هناك مشكلة في الاتصال
-      if (error.name === 'MongoNetworkError' || 
-          error.name === 'MongooseServerSelectionError' ||
-          mongoose.connection.readyState !== 1) {
+      // التحقق من حالة الاتصال
+      if (mongoose.connection.readyState !== 1) {
         try {
-          logger.info('Attempting to reconnect to database...');
-          await mongoose.connect(process.env.MONGO_URI, {
-            serverSelectionTimeoutMS: 5000,
-            socketTimeoutMS: 45000
-          });
-          logger.info('Successfully reconnected to database');
+          await mongoose.connect(process.env.MONGO_URI);
         } catch (connError) {
-          logger.error('Failed to reconnect to database:', connError);
+          logger.error('Failed to reconnect:', connError);
         }
       }
     }
@@ -163,64 +146,11 @@ async function getErrorChannel(guild) {
     }
 }
 
-/**
- * دالة مساعدة لتنسيق صيغ الوقت بالعربية (مفرد، مثنى، جمع)
- * @param {number} number الرقم الذي سيتم تنسيقه
- * @param {string} singular صيغة المفرد (ساعة/دقيقة)
- * @param {string} dual صيغة المثنى (ساعتان/دقيقتان)
- * @param {string} plural صيغة الجمع (ساعات/دقائق)
- * @returns {string} النص المنسق بالعربية
- */
-function formatArabicTime(number, singular, dual, plural) {
-    if (number === 0) return `${number} ${singular}`;
-    if (number === 1) return `${singular} واحدة`;
-    if (number === 2) return dual;
-    if (number >= 3 && number <= 10) return `${number} ${plural}`;
-    return `${number} ${singular}`;
-}
-
-/**
- * دالة لاستنساخ الكائنات بأمان مع تجنب مشاكل خصائص القراءة فقط مثل TCP
- * @param {Object} obj الكائن المراد نسخه
- * @returns {Object} نسخة آمنة من الكائن
- */
-function safeClone(obj) {
-    if (!obj || typeof obj !== 'object') return obj;
-    
-    try {
-        // محاولة استخدام مكتبة clone
-        return require('clone')(obj);
-    } catch (error) {
-        logger.debug('Failed to deep clone object, falling back to shallow clone');
-        
-        // عمل نسخة سطحية كبديل
-        if (Array.isArray(obj)) {
-            return [...obj];
-        } else {
-            // عمل نسخة سطحية من الكائن مع تجاهل الخصائص غير القابلة للنسخ
-            const result = {};
-            for (const key in obj) {
-                try {
-                    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                        result[key] = obj[key];
-                    }
-                } catch (e) {
-                    // تجاهل الخصائص التي تسبب أخطاء
-                    logger.debug(`Skipping property ${key} during clone`);
-                }
-            }
-            return result;
-        }
-    }
-}
-
 module.exports = {
   checkRequiredChannels,
   checkBotPermissions,
   retryOperation,
   handleError,
   setupErrorChannel,
-  getErrorChannel,
-  formatArabicTime,
-  safeClone
-};
+  getErrorChannel
+}; 

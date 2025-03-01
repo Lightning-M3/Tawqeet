@@ -52,15 +52,7 @@ class Logger {
     }
 
     log(level, message, data = {}) {
-        // تصفية السجلات غير الضرورية في بيئة الإنتاج
-        if (process.env.NODE_ENV === 'production' && level === 'debug') {
-            return;
-        }
-        
-        // تنظيف بيانات السجل
-        const safeData = this._sanitizeLogData(data);
-        
-        this.logger.log(level, message, { ...safeData, timestamp: new Date() });
+        this.logger.log(level, message, { ...data, timestamp: new Date() });
     }
 
     error(message, error = null, critical = false) {
@@ -71,45 +63,20 @@ class Logger {
             critical
         };
 
-        // تنظيف Stack Trace الطويل
-        if (errorData.stack && errorData.stack.length > 2000) {
-            errorData.stack = errorData.stack.substring(0, 2000) + '... [truncated]';
-        }
-
         this.logger.error(message, errorData);
 
         // إرسال الأخطاء المهمة عبر Webhook
         if (critical && this.webhook) {
-            // استخدام تأخير لتجنب طلبات Webhook المتزامنة
-            setTimeout(() => this.notifyError(errorData), 100);
+            this.notifyError(errorData);
         }
     }
 
     async notifyError(errorData) {
         try {
-            // منع إرسال إشعارات متكررة بنفس الخطأ في فترة زمنية قصيرة
-            const errorKey = `${errorData.message.substring(0, 50)}`;
-            if (this._recentErrors && this._recentErrors[errorKey]) {
-                const timeSinceLastError = Date.now() - this._recentErrors[errorKey];
-                if (timeSinceLastError < 300000) { // 5 دقائق
-                    return;
-                }
-            }
-            
-            if (!this._recentErrors) {
-                this._recentErrors = {};
-            }
-            this._recentErrors[errorKey] = Date.now();
-            
-            // تقصير وصف الخطأ إذا كان طويلًا
-            const description = errorData.message.length > 1500 ? 
-                errorData.message.substring(0, 1500) + '... [truncated]' : 
-                errorData.message;
-
             await this.webhook.send({
                 embeds: [{
                     title: '🚨 خطأ حرج',
-                    description: description,
+                    description: errorData.message,
                     fields: [
                         {
                             name: 'Stack Trace',
@@ -129,7 +96,7 @@ class Logger {
                 }]
             });
         } catch (error) {
-            this.logger.error('Failed to send webhook notification', { error: error.message });
+            this.logger.error('Failed to send webhook notification', error);
         }
     }
 
@@ -143,36 +110,6 @@ class Logger {
 
     debug(message, data = {}) {
         this.log('debug', message, data);
-    }
-    
-    // دالة خاصة لتنظيف بيانات السجل
-    _sanitizeLogData(data) {
-        if (!data || typeof data !== 'object') return data;
-        
-        const safeData = {};
-        Object.keys(data).forEach(key => {
-            // تجاهل الكائنات الكبيرة والمعقدة
-            if (data[key] instanceof Buffer) {
-                safeData[key] = '[Buffer]';
-            } else if (data[key] instanceof Error) {
-                safeData[key] = { 
-                    message: data[key].message,
-                    name: data[key].name,
-                    stack: data[key].stack?.substring(0, 500)
-                };
-            } else if (typeof data[key] === 'object' && data[key] !== null) {
-                try {
-                    const str = JSON.stringify(data[key]);
-                    safeData[key] = str.length > 1000 ? '[Large Object]' : data[key];
-                } catch (e) {
-                    safeData[key] = '[Circular or Unstringifiable Object]';
-                }
-            } else {
-                safeData[key] = data[key];
-            }
-        });
-        
-        return safeData;
     }
 
     // تنظيف السجلات القديمة
