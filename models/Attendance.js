@@ -15,12 +15,9 @@ const attendanceSchema = new mongoose.Schema({
   sessionsCount: { type: Number, default: 0 }, // عدد الجلسات المكتملة
   lastSessionDuration: { type: Number, default: 0 } // مدة آخر جلسة بالدقائق
 }, 
-// إضافة طوابع الوقت وإنشاء مستند رقيق
+// إضافة طوابع الوقت
 { 
-  timestamps: true,
-  // منع تحويل _id إلى كائن ObjectId داخل المصفوفات الفرعية للتقليل من استهلاك الذاكرة
-  _id: false,
-  id: false
+  timestamps: true
 });
 
 // إضافة مؤشرات للبحث السريع
@@ -51,41 +48,73 @@ attendanceSchema.methods.calculateTime = function() {
     
     return acc;
   }, { totalMinutes: 0, lastSessionDuration: 0 });
-
-  // تحديث إحصائيات الوقت
+  
+  // تحديث البيانات الإجمالية
   this.totalDuration = totalMinutes;
   this.totalHours = Math.floor(totalMinutes / 60);
   this.totalMinutes = totalMinutes % 60;
   this.sessionsCount = completedSessions.length;
-  this.lastSessionDuration = completedSessions.length ? lastSessionDuration : 0;
+  this.lastSessionDuration = lastSessionDuration;
+  
+  return {
+    totalHours: this.totalHours,
+    totalMinutes: this.totalMinutes,
+    totalDuration: this.totalDuration,
+    sessionsCount: this.sessionsCount
+  };
 };
 
 // دالة مساعدة لحساب متوسط وقت الجلسات - محسنة
 attendanceSchema.methods.getAverageSessionDuration = function() {
-  if (this.sessionsCount === 0) return 0;
-  return Math.floor(this.totalDuration / this.sessionsCount);
+  return this.sessionsCount > 0 ? Math.round(this.totalDuration / this.sessionsCount) : 0;
 };
 
 // دالة مساعدة للحصول على تفاصيل الجلسات - محسنة لتصفية النتائج مباشرة
 attendanceSchema.methods.getSessionsDetails = function() {
-  return this.sessions
-    .filter(session => session.checkOut)
-    .map((session, index) => ({
-      sessionNumber: index + 1,
-      startTime: session.checkIn,
-      endTime: session.checkOut,
-      duration: session.duration
-    }));
+  return this.sessions.map(session => ({
+    checkIn: session.checkIn,
+    checkOut: session.checkOut,
+    duration: session.duration,
+    isCompleted: Boolean(session.checkOut),
+    // مختصر بوقت محلي لتسهيل العرض
+    localCheckIn: session.checkIn ? session.checkIn.toLocaleString() : null,
+    localCheckOut: session.checkOut ? session.checkOut.toLocaleString() : null
+  }));
+};
+
+// إضافة طريقة ساكنة لإنشاء سجل حضور جديد
+attendanceSchema.statics.createAttendance = async function(userId, guildId, checkInTime) {
+  try {
+    const today = new Date(checkInTime);
+    today.setUTCHours(0, 0, 0, 0);
+    
+    const newAttendance = new this({
+      userId,
+      guildId,
+      date: today,
+      sessions: [{
+        checkIn: checkInTime,
+        duration: 0
+      }]
+    });
+    
+    return await newAttendance.save();
+  } catch (error) {
+    // إعادة رمي الخطأ مع معلومات إضافية للتشخيص
+    throw new Error(`فشل إنشاء سجل حضور جديد: ${error.message}`);
+  }
 };
 
 // إضافة طريقة ساكنة للتحديث المباشر للكفاءة
 attendanceSchema.statics.updateAttendance = async function(userId, guildId, date, sessionData) {
-  const result = await this.updateOne(
+  // تحديث سجل الحضور باستخدام جلسة جديدة
+  const result = await this.findOneAndUpdate(
     { userId, guildId, date },
     { 
-      $push: { sessions: sessionData }
+      $push: { sessions: sessionData },
+      $set: { lastUpdated: new Date() }
     },
-    { upsert: true }
+    { new: true, upsert: true }
   );
   
   return result;
@@ -93,28 +122,41 @@ attendanceSchema.statics.updateAttendance = async function(userId, guildId, date
 
 // إضافة طريقة لتحديث معلومات تسجيل الخروج بكفاءة (بدون قراءة ثم كتابة)
 attendanceSchema.statics.updateCheckOut = async function(userId, guildId, date, checkOutTime) {
-  return this.updateOne(
-    {
-      userId,
-      guildId,
-      date,
-      'sessions.checkOut': { $exists: false }
-    },
-    {
-      $set: { 'sessions.$.checkOut': checkOutTime }
-    }
-  );
+  // البحث عن السجل وآخر جلسة غير مكتملة
+  const record = await this.findOne({ userId, guildId, date });
+  
+  if (!record || !record.sessions || record.sessions.length === 0) {
+    throw new Error('لم يتم العثور على سجل حضور أو جلسات');
+  }
+  
+  // العثور على آخر جلسة غير مكتملة
+  const lastSessionIndex = record.sessions.findIndex(session => !session.checkOut);
+  
+  if (lastSessionIndex === -1) {
+    throw new Error('جميع الجلسات مكتملة بالفعل');
+  }
+  
+  // تحديث وقت تسجيل الخروج
+  record.sessions[lastSessionIndex].checkOut = checkOutTime;
+  
+  // حساب الإحصائيات المحدثة
+  record.calculateTime();
+  
+  // حفظ التغييرات
+  await record.save();
+  
+  return record;
 };
 
 // إضافة طريقة للحصول على تقرير الحضور مع التحسين
 attendanceSchema.statics.getReport = async function(userId, guildId, startDate, endDate) {
-  return this.find({ 
-    userId, 
-    guildId, 
-    date: { $gte: startDate, $lte: endDate } 
+  return this.find({
+    userId,
+    guildId,
+    date: { $gte: startDate, $lte: endDate }
   })
+  .select('date sessions totalDuration totalHours totalMinutes sessionsCount')
   .sort({ date: 1 })
-  .select('date totalDuration totalHours totalMinutes sessionsCount')
   .lean();
 };
 

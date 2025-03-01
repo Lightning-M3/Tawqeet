@@ -1124,24 +1124,15 @@ async function handleCheckIn(interaction) {
         const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
 
         if (!attendanceRecord) {
-            const record = new Attendance({
-                userId: interaction.user.id,
-                guildId: interaction.guild.id,
-                date: getStartOfDay(),
-                sessions: []
-            });
-
-            // إضافة جلسة جديدة
-            record.sessions.push({
-                checkIn: convertToRiyadhTime(new Date()),
-                duration: 0
-            });
-
             await retryOperation(async () => {
-                return await record.save();
+                return await Attendance.createAttendance(
+                    interaction.user.id,
+                    interaction.guild.id,
+                    convertToRiyadhTime(new Date())
+                );
             }).catch(err => {
-                logger.error('Error saving attendance record:', err);
-                throw new Error('فشل في حفظ سجل الحضور');
+                logger.error('Error creating attendance record:', err);
+                throw new Error('فشل في إنشاء سجل الحضور');
             });
         } else {
             // التحقق من عدم وجود جلسة مفتوحة
@@ -1506,7 +1497,7 @@ async function setupBot() {
             if (!client.isReady()) {
                 console.log('Bot disconnected. Attempting to reconnect...');
                 try {
-                    await client.login(process.env.DISCORD_TOKEN);
+                    await client.login(process.env.TOKEN);
                 } catch (error) {
                     console.error('Failed to reconnect:', error);
                 }
