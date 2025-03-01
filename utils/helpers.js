@@ -32,7 +32,9 @@ async function checkBotPermissions(guild, client) {
 }
 
 // دالة لإعادة محاولة العمليات
-async function retryOperation(operation, maxRetries = 5, delay = 2000) {
+async function retryOperation(operation, maxRetries = 5, initialDelay = 1000, maxDelay = 10000) {
+  let delay = initialDelay;
+  
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await operation();
@@ -41,15 +43,23 @@ async function retryOperation(operation, maxRetries = 5, delay = 2000) {
       
       logger.warn(`Retry attempt ${i + 1}/${maxRetries}`, { error: error.message });
       
-      // انتظار متزايد بين المحاولات
-      await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+      // انتظار مع زيادة أسية محدودة
+      await new Promise(resolve => setTimeout(resolve, Math.min(delay, maxDelay)));
+      delay = Math.min(delay * 1.5, maxDelay);
       
-      // التحقق من حالة الاتصال
-      if (mongoose.connection.readyState !== 1) {
+      // التحقق من حالة الاتصال فقط إذا كانت هناك مشكلة في الاتصال
+      if (error.name === 'MongoNetworkError' || 
+          error.name === 'MongooseServerSelectionError' ||
+          mongoose.connection.readyState !== 1) {
         try {
-          await mongoose.connect(process.env.MONGO_URI);
+          logger.info('Attempting to reconnect to database...');
+          await mongoose.connect(process.env.MONGO_URI, {
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000
+          });
+          logger.info('Successfully reconnected to database');
         } catch (connError) {
-          logger.error('Failed to reconnect:', connError);
+          logger.error('Failed to reconnect to database:', connError);
         }
       }
     }

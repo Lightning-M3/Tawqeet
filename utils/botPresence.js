@@ -1,5 +1,9 @@
 const logger = require('./logger');
 
+// تخزين آخر تحديث للحالة وعدد السيرفرات
+let lastPresenceUpdate = 0;
+let lastGuildCount = 0;
+
 /**
  * تحديث حالة البوت
  * @param {Client} client - كائن البوت
@@ -25,16 +29,28 @@ async function updateBotPresence(client) {
             return;
         }
 
+        const now = Date.now();
+        const currentGuildCount = client.guilds.cache.size;
+        
+        // تحديث فقط إذا مر وقت كافٍ (10 دقائق) أو تغير عدد السيرفرات
+        if (now - lastPresenceUpdate < 600000 && currentGuildCount === lastGuildCount) {
+            return;
+        }
+        
         // تحديث حالة البوت
         await client.user.setPresence({
             activities: [{
-                name: `${client.guilds.cache.size} servers`,
+                name: `${currentGuildCount} servers`,
                 type: 3 // WATCHING
             }],
             status: 'online'
         });
+        
+        // تحديث المتغيرات المخزنة
+        lastPresenceUpdate = now;
+        lastGuildCount = currentGuildCount;
 
-        logger.info(`Bot is now online on ${client.guilds.cache.size} servers`);
+        logger.info(`Bot is now online on ${currentGuildCount} servers`);
 
     } catch (error) {
         logger.error('Error updating bot presence:', {
@@ -44,4 +60,4 @@ async function updateBotPresence(client) {
     }
 }
 
-module.exports = { updateBotPresence }; 
+module.exports = { updateBotPresence };

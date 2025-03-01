@@ -145,6 +145,11 @@ const commandCooldowns = new Map();
 const ticketAttempts = new Map();
 const attendanceLocks = new Map();
 
+// إعداد نظام التخزين المؤقت الذي سيستخدم للتفاعلات
+const commandCache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5 دقائق
+const userCache = new NodeCache({ stdTTL: 1800, checkperiod: 300 }); // 30 دقيقة
+const guildCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 }); // ساعة واحدة
+
 // ============= استيراد الملفات المحلية =============
 const { setupDailyReset, forceCheckOutAll, sendDailyReport } = require('./cronJobs/dailyReset');
 const { handleError } = require('./utils/helpers'); // استيراد دالة handleError بشكل صحيح
@@ -164,52 +169,80 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // ============= الاتصال بقاعدة البيانات =============
 mongoose.set('bufferCommands', true);
+// تحسين إعدادات المصادقة والأمان
+mongoose.set('debug', process.env.NODE_ENV === 'development');
 
-mongoose.connect(process.env.MONGO_URI, {
+// تكوين أكثر مرونة للاتصال
+const dbOptions = {
     serverSelectionTimeoutMS: 30000,
-    socketTimeoutMS: 45000,
+    socketTimeoutMS: 60000,
     connectTimeoutMS: 30000,
-    maxPoolSize: 10,
-    minPoolSize: 2,
-    maxIdleTimeMS: 30000,
+    maxPoolSize: 20,         // زيادة حجم المجمع لدعم المزيد من الاتصالات المتزامنة
+    minPoolSize: 5,          // ضمان وجود اتصالات كافية متاحة دائمًا
+    maxIdleTimeMS: 45000,    // السماح للاتصالات بالبقاء خاملة لفترة أطول
     waitQueueTimeoutMS: 30000,
-    heartbeatFrequencyMS: 10000
-}).then(() => {
-    logger.info('Connected to MongoDB database');
-}).catch((err) => {
-    logger.error('Error connecting to database:', err, true);
+    heartbeatFrequencyMS: 10000,
+    autoIndex: process.env.NODE_ENV !== 'production', // تعطيل إنشاء الفهارس التلقائي في بيئة الإنتاج
+    retryWrites: true,
+    retryReads: true
+};
+
+// استخدام نمط التأخير التطوري المحسن للاتصال بقاعدة البيانات
+const connectWithRetry = async (attempt = 1, maxAttempts = 10, initialDelay = 2000) => {
+    try {
+        await mongoose.connect(process.env.MONGO_URI, dbOptions);
+        logger.info('Connected to MongoDB database successfully');
+        return true;
+    } catch (err) {
+        if (attempt >= maxAttempts) {
+            logger.error('Failed to connect to database after maximum attempts', { error: err.message, attempt, maxAttempts }, true);
+            process.exit(1);
+        }
+
+        const delay = Math.min(initialDelay * Math.pow(1.5, attempt - 1), 60000); // حد أقصى 60 ثانية
+        logger.warn(`Connection attempt ${attempt} failed. Retrying in ${delay}ms...`, { error: err.message });
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return connectWithRetry(attempt + 1, maxAttempts, initialDelay);
+    }
+};
+
+// بدء الاتصال مع إعادة المحاولة
+connectWithRetry().catch(err => {
+    logger.error('Initial database connection failed:', { error: err.message }, true);
     process.exit(1);
 });
 
-// معالجة أحداث قاعدة البيانات
+// استخدام آليات معالجة أخطاء متقدمة لاتصال قاعدة البيانات
 mongoose.connection.on('disconnected', async () => {
-    console.log('Database connection lost. Attempting to reconnect...');
-    let retries = 5;
-    while (retries > 0) {
-        try {
-            await mongoose.connect(process.env.MONGO_URI);
-            console.log('Successfully reconnected to database');
-            break;
-        } catch (error) {
-            console.error(`Reconnection attempt failed. Remaining attempts: ${retries}`);
-            retries--;
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
-    }
-    if (retries === 0) {
-        console.error('Failed to reconnect after multiple attempts. Shutting down bot...');
-        process.exit(1);
+    logger.warn('Database connection lost. Attempting to reconnect automatically...');
+    // mongoose سيحاول إعادة الاتصال تلقائيًا، لذا ننتظر قليلاً قبل التدخل
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    // إذا لم يتم إعادة الاتصال تلقائيًا، نحاول يدويًا
+    if (mongoose.connection.readyState !== 1) {
+        logger.info('Manually initiating database reconnection...');
+        await connectWithRetry();
     }
 });
 
-mongoose.connection.on('error', async (err) => {
-    console.error('Database connection error:', err);
-    try {
-        await mongoose.connect(process.env.MONGO_URI);
-    } catch (error) {
-        console.error('Failed to reconnect:', error);
-    }
+mongoose.connection.on('connected', () => {
+    logger.info('Database connection established');
 });
+
+mongoose.connection.on('error', (err) => {
+    logger.error('Database connection error:', { error: err.message });
+});
+
+// إضافة دورة دورية للتحقق من حالة الاتصال بقاعدة البيانات كل ساعة
+setInterval(() => {
+    if (mongoose.connection.readyState !== 1) {
+        logger.warn('Database connection check: Not connected. Attempting to reconnect...');
+        connectWithRetry();
+    } else {
+        logger.debug('Database connection check: Connection healthy');
+    }
+}, 60 * 60 * 1000); // كل ساعة
 
 // ============= إعداد الأحداث الأساسية =============
 client.once(Events.ClientReady, async () => {
@@ -253,27 +286,43 @@ client.on('interactionCreate', async (interaction) => {
                 return;
             }
 
+            // استخدام التخزين المؤقت للأوامر المتكررة إذا كان الأمر يدعم ذلك
+            if (command.cacheable !== false) {
+                const cacheKey = getInteractionCacheKey(interaction);
+                const cachedResponse = commandCache.get(cacheKey);
+                
+                // استخدام الاستجابة المخزنة مؤقتًا إذا كانت متوفرة (للأوامر التي لا تتطلب تفاعلات فورية)
+                if (cachedResponse && command.allowCachedResponse !== false) {
+                    await interaction.reply(cachedResponse);
+                    return;
+                }
+                
+                // تنفيذ الأمر واحتمال تخزين النتيجة
+                try {
+                    const result = await command.execute(interaction, { 
+                        cache: {
+                            commandCache,
+                            userCache,
+                            guildCache,
+                            setCache: (data) => commandCache.set(cacheKey, data)
+                        } 
+                    });
+                    
+                    // تخزين النتيجة إذا أرجع الأمر بيانات قابلة للتخزين المؤقت
+                    if (result && command.cacheable !== false) {
+                        commandCache.set(cacheKey, result);
+                    }
+                } catch (error) {
+                    handleCommandError(interaction, error);
+                }
+                return;
+            }
+            
+            // للأوامر التي لا تدعم التخزين المؤقت
             try {
                 await command.execute(interaction);
             } catch (error) {
-                logger.error(`خطأ في تنفيذ الأمر ${interaction.commandName}:`, {
-                    error: error.message,
-                    stack: error.stack,
-                    command: interaction.commandName,
-                    options: interaction.options?.data
-                });
-
-                // التحقق من حالة التفاعل قبل الرد
-                const errorMessage = {
-                    content: '❌ حدث خطأ أثناء تنفيذ الأمر. الرجاء المحاولة مرة أخرى.',
-                    ephemeral: true
-                };
-
-                if (interaction.deferred) {
-                    await interaction.followUp(errorMessage);
-                } else if (!interaction.replied) {
-                    await interaction.reply(errorMessage);
-                }
+                handleCommandError(interaction, error);
             }
             return;
         }
@@ -289,6 +338,20 @@ client.on('interactionCreate', async (interaction) => {
                     userId: interaction.user.id
                 });
                 return;
+            }
+
+            // تحديد ما إذا كان التفاعل قابل للتخزين المؤقت
+            const isCacheable = !customId.includes('check_') && !customId.includes('ticket');
+            
+            // التحقق من وجود استجابة مخزنة مؤقتًا للتفاعلات المتكررة
+            if (isCacheable) {
+                const cacheKey = getInteractionCacheKey(interaction);
+                const cachedResponse = commandCache.get(cacheKey);
+                
+                if (cachedResponse) {
+                    await interaction.reply(cachedResponse);
+                    return;
+                }
             }
 
             // معالجة التفاعلات المختلفة
@@ -312,6 +375,13 @@ client.on('interactionCreate', async (interaction) => {
                     break;
                 case customId.startsWith('servers-list'):
                     // معالجة زر عرض قائمة السيرفرات
+                    const serversResponse = await handleServersList(interaction);
+                    
+                    // تخزين استجابة قائمة السيرفرات
+                    if (isCacheable && serversResponse) {
+                        const cacheKey = getInteractionCacheKey(interaction);
+                        commandCache.set(cacheKey, serversResponse);
+                    }
                     break;
                 default:
                     logger.warn('تفاعل غير معروف', {
@@ -337,7 +407,7 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
             const errorMessage = {
-                content: '❌ حدث خطأ غير متوقع. الرجاء المحاولة مرة أخرى لاحقاً.',
+                content: '❌ حدث خطأ غير متوقع. الرجاء المحاولة لاحقاً.',
                 ephemeral: true
             };
 
@@ -354,6 +424,87 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 });
+
+// دالة للحصول على مفتاح التخزين المؤقت للتفاعل
+function getInteractionCacheKey(interaction) {
+    if (interaction.isChatInputCommand()) {
+        // إنشاء مفتاح فريد للأمر استنادًا إلى الاسم والخيارات
+        const options = interaction.options?.data?.map(opt => 
+            `${opt.name}:${opt.value}`).join('-') || '';
+        return `cmd:${interaction.commandName}:${options}:${interaction.user.id}`;
+    } else if (interaction.isButton() || interaction.isModalSubmit()) {
+        return `interaction:${interaction.customId}:${interaction.user.id}`;
+    }
+    return null;
+}
+
+// إضافة معلومات الحضور إلى التخزين المؤقت
+function cacheUserAttendance(userId, guildId, data) {
+    userCache.set(`attendance:${userId}:${guildId}`, data);
+}
+
+// الحصول على معلومات الحضور من التخزين المؤقت
+function getCachedUserAttendance(userId, guildId) {
+    return userCache.get(`attendance:${userId}:${guildId}`);
+}
+
+// تعيين معلومات السيرفر في التخزين المؤقت
+function cacheGuildInfo(guildId, data) {
+    guildCache.set(`guild:${guildId}`, data);
+}
+
+// الحصول على معلومات السيرفر من التخزين المؤقت
+function getCachedGuildInfo(guildId) {
+    return guildCache.get(`guild:${guildId}`);
+}
+
+// دالة موحدة لمعالجة أخطاء الأوامر
+function handleCommandError(interaction, error) {
+    logger.error(`خطأ في تنفيذ الأمر ${interaction.commandName}:`, {
+        error: error.message,
+        stack: error.stack,
+        command: interaction.commandName,
+        options: interaction.options?.data
+    });
+
+    // التحقق من حالة التفاعل قبل الرد
+    const errorMessage = {
+        content: '❌ حدث خطأ أثناء تنفيذ الأمر. الرجاء المحاولة مرة أخرى.',
+        ephemeral: true
+    };
+
+    if (interaction.deferred) {
+        interaction.followUp(errorMessage).catch(e => {
+            logger.error('فشل في إرسال رسالة متابعة للخطأ:', e);
+        });
+    } else if (!interaction.replied) {
+        interaction.reply(errorMessage).catch(e => {
+            logger.error('فشل في إرسال رد للخطأ:', e);
+        });
+    }
+}
+
+// دالة تنظيف الذاكرة المؤقتة
+function cleanupCache() {
+    const commandStats = commandCache.getStats();
+    const userStats = userCache.getStats();
+    const guildStats = guildCache.getStats();
+    
+    logger.debug('Cache cleanup performed', {
+        commands: { keys: commandStats.keys, hits: commandStats.hits, misses: commandStats.misses },
+        users: { keys: userStats.keys, hits: userStats.hits, misses: userStats.misses },
+        guilds: { keys: guildStats.keys, hits: guildStats.hits, misses: guildStats.misses }
+    });
+    
+    // إذا كان هناك حمل عالٍ في وقت الذروة، نقوم بتنظيف التخزين المؤقت للأوامر
+    const currentHour = new Date().getHours();
+    const isPeakHour = currentHour >= 9 && currentHour <= 17; // ساعات العمل
+    
+    if (isPeakHour && commandStats.keys > 1000) {
+        logger.info('High load detected during peak hours, flushing command cache');
+        commandCache.flushAll();
+    }
+}
 
 // ============= معالجة الأحداث والتفاعلات =============
 
