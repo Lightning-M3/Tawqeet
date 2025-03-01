@@ -2496,8 +2496,7 @@ async function createTicketChannel(interaction, content) {
         }
         
         // إنشاء اسم للقناة
-        const ticketNumber = Math.floor(Math.random() * 10000);
-        const channelName = `ticket-${user.username}-${ticketNumber}`;
+        const channelName = `ticket-${user.username}`;
         
         // إنشاء القناة
         const ticketChannel = await guild.channels.create({
