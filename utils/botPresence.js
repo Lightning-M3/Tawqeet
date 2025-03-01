@@ -9,19 +9,19 @@ async function updateBotPresence(client) {
     try {
         // التحقق من وجود client
         if (!client) {
-            logger.error('كائن client غير معرف في updateBotPresence');
+            logger.error('Client object not found in updateBotPresence');
             return;
         }
 
         // التحقق من وجود client.user
         if (!client.user) {
-            logger.warn('client.user غير معرف بعد، يتم تأجيل تحديث الحالة');
+            logger.warn('client.user not found after, skipping update');
             return;
         }
 
         // التحقق من جاهزية البوت
         if (!client.isReady()) {
-            logger.warn('البوت غير جاهز بعد، يتم تأجيل تحديث الحالة');
+            logger.warn('Bot is not ready yet, deferring update');
             return;
         }
 
@@ -34,13 +34,10 @@ async function updateBotPresence(client) {
             status: 'online'
         });
 
-        logger.info('تم تحديث حالة البوت بنجاح', {
-            guildsCount: client.guilds.cache.size,
-            status: 'online'
-        });
+        logger.info('Bot is now online on ${client.guilds.cache.size} servers');
 
     } catch (error) {
-        logger.error('خطأ في تحديث حالة البوت:', {
+        logger.error('Error updating bot presence:', {
             error: error.message,
             stack: error.stack
         });
