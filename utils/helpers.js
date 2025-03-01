@@ -165,11 +165,46 @@ async function getErrorChannel(guild) {
  * @returns {string} النص المنسق بالعربية
  */
 function formatArabicTime(number, singular, dual, plural) {
-    if (number === 0) return '';
-    if (number === 1) return `${number} ${singular}`;
-    if (number === 2) return `${dual}`;
+    if (number === 0) return `${number} ${singular}`;
+    if (number === 1) return `${singular} واحدة`;
+    if (number === 2) return dual;
     if (number >= 3 && number <= 10) return `${number} ${plural}`;
     return `${number} ${singular}`;
+}
+
+/**
+ * دالة لاستنساخ الكائنات بأمان مع تجنب مشاكل خصائص القراءة فقط مثل TCP
+ * @param {Object} obj الكائن المراد نسخه
+ * @returns {Object} نسخة آمنة من الكائن
+ */
+function safeClone(obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    
+    try {
+        // محاولة استخدام مكتبة clone
+        return require('clone')(obj);
+    } catch (error) {
+        logger.debug('Failed to deep clone object, falling back to shallow clone');
+        
+        // عمل نسخة سطحية كبديل
+        if (Array.isArray(obj)) {
+            return [...obj];
+        } else {
+            // عمل نسخة سطحية من الكائن مع تجاهل الخصائص غير القابلة للنسخ
+            const result = {};
+            for (const key in obj) {
+                try {
+                    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                        result[key] = obj[key];
+                    }
+                } catch (e) {
+                    // تجاهل الخصائص التي تسبب أخطاء
+                    logger.debug(`Skipping property ${key} during clone`);
+                }
+            }
+            return result;
+        }
+    }
 }
 
 module.exports = {
@@ -179,5 +214,6 @@ module.exports = {
   handleError,
   setupErrorChannel,
   getErrorChannel,
-  formatArabicTime
-}; 
+  formatArabicTime,
+  safeClone
+};

@@ -76,8 +76,15 @@ const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
 const { setupGuild } = require('./utils/guildSetup'); // استيراد دالة setupGuild
 
-// ============= الدوال المساعدة الأساسية =============
+// ============= الدوال المساعدة =============
 
+/**
+ * دالة لاستنساخ الكائنات بأمان مع تجنب مشاكل خصائص القراءة فقط مثل TCP
+ * @param {Object} obj الكائن المراد نسخه
+ * @returns {Object} نسخة آمنة من الكائن
+ */
+
+// ============= وظائف إدارة الأخطاء =============
 // تم نقل دالة retryOperation إلى ملف helpers.js
 // وتم استيرادها في أعلى الملف
 
@@ -269,6 +276,36 @@ client.once(Events.ClientReady, async () => {
             error: error.message,
             stack: error.stack
         });
+    }
+});
+
+// معالجة حدث حذف السيرفر
+client.on('guildDelete', async (guild) => {
+    try {
+        logger.info(`Bot was removed from guild: ${guild.name} (${guild.id})`);
+        
+        // هنا يمكن تنفيذ أي إجراء تنظيف بعد الخروج من السيرفر
+        // مثلاً حذف بيانات السيرفر من قاعدة البيانات
+        await GuildSettings.deleteOne({ guildId: guild.id });
+        logger.info(`Deleted guild settings for guild: ${guild.id}`);
+        
+    } catch (error) {
+        logger.error(`Error in guildDelete event: ${error.message}`);
+    }
+});
+
+// إضافة معالج لحدث حذف القنوات
+client.on('channelDelete', async (channel) => {
+    try {
+        if (!channel.guild) return; // تجاهل القنوات غير التابعة لسيرفر
+        
+        logger.info(`Channel deleted: ${channel.name} (${channel.id}) in guild ${channel.guild.name}`);
+        
+        // تحديث إعدادات السيرفر بأمان
+        await GuildSettings.handleChannelDelete(channel.guild.id, channel.id);
+        
+    } catch (error) {
+        logger.error(`Error in channelDelete event: ${error.message}`, { error });
     }
 });
 
@@ -475,7 +512,7 @@ function handleCommandError(interaction, error) {
 
     if (interaction.deferred) {
         interaction.followUp(errorMessage).catch(e => {
-            logger.error('فشل في إرسال رسالة متابعة للخطأ:', e);
+            logger.error('فشل في إرسال رد للخطأ:', e);
         });
     } else if (!interaction.replied) {
         interaction.reply(errorMessage).catch(e => {

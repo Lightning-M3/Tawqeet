@@ -17,7 +17,8 @@ module.exports = {
         await interaction.deferReply({ ephemeral: true });
 
         try {
-            const guilds = interaction.client.guilds.cache;
+            // استخدام Array.from بدلاً من الوصول المباشر للكاش
+            const guilds = Array.from(interaction.client.guilds.cache.values());
             const totalMembers = guilds.reduce((acc, guild) => acc + guild.memberCount, 0);
             
             // إنشاء Embed رئيسي
@@ -25,7 +26,7 @@ module.exports = {
                 .setTitle('📊 إحصائيات البوت')
                 .setColor(0x0099FF)
                 .addFields(
-                    { name: 'عدد السيرفرات', value: `${guilds.size}`, inline: true },
+                    { name: 'عدد السيرفرات', value: `${guilds.length}`, inline: true },
                     { name: 'إجمالي الأعضاء', value: `${totalMembers}`, inline: true }
                 )
                 .setTimestamp();
@@ -38,38 +39,45 @@ module.exports = {
             
             let fieldCount = 0;
 
-            for (const [, guild] of guilds) {
-                // الحصول على تاريخ دخول البوت
-                const botJoinDate = guild.members.cache.get(interaction.client.user.id).joinedAt;
-                
-                // الحصول على معلومات المالك
-                const owner = await guild.fetchOwner();
-                
-                // إنشاء حقل للسيرفر
-                const fieldValue = [
-                    `👑 المالك: ${owner.user.tag}`,
-                    `👥 الأعضاء: ${guild.memberCount}`,
-                    `🤖 تاريخ دخول البوت: <t:${Math.floor(botJoinDate.getTime() / 1000)}:R>`,
-                    `🔗 رابط الصورة: ${guild.iconURL() || 'لا يوجد'}`,
-                    `🆔 معرف السيرفر: ${guild.id}`
-                ].join('\n');
+            for (const guild of guilds) {
+                try {
+                    // استخدام طرق آمنة للوصول إلى البيانات
+                    const botMember = guild.members.cache.get(interaction.client.user.id);
+                    const botJoinDate = botMember ? botMember.joinedAt : new Date();
+                    
+                    // الحصول على معلومات المالك بشكل آمن
+                    const owner = await guild.fetchOwner().catch(() => null);
+                    const ownerTag = owner ? owner.user.tag : 'غير معروف';
+                    
+                    // إنشاء حقل للسيرفر
+                    const fieldValue = [
+                        `👑 المالك: ${ownerTag}`,
+                        `👥 الأعضاء: ${guild.memberCount}`,
+                        `🤖 تاريخ دخول البوت: <t:${Math.floor(botJoinDate.getTime() / 1000)}:R>`,
+                        `🔗 رابط الصورة: ${guild.iconURL() || 'لا يوجد'}`,
+                        `🆔 معرف السيرفر: ${guild.id}`
+                    ].join('\n');
 
-                // إذا وصل عدد الحقول إلى 10، نبدأ embed جديد
-                if (fieldCount === 10) {
-                    serverEmbeds.push(currentEmbed);
-                    currentEmbed = new EmbedBuilder()
-                        .setTitle('🔍 قائمة السيرفرات (تابع)')
-                        .setColor(0x0099FF);
-                    fieldCount = 0;
+                    // إذا وصل عدد الحقول إلى 10، نبدأ embed جديد
+                    if (fieldCount === 10) {
+                        serverEmbeds.push(currentEmbed);
+                        currentEmbed = new EmbedBuilder()
+                            .setTitle('🔍 قائمة السيرفرات (تابع)')
+                            .setColor(0x0099FF);
+                        fieldCount = 0;
+                    }
+
+                    currentEmbed.addFields({
+                        name: `${guild.name}`,
+                        value: fieldValue,
+                        inline: false
+                    });
+
+                    fieldCount++;
+                } catch (guildError) {
+                    console.error(`Error processing guild ${guild.id || 'unknown'}:`, guildError);
+                    // استمرار المعالجة رغم الخطأ في هذا السيرفر
                 }
-
-                currentEmbed.addFields({
-                    name: `${guild.name}`,
-                    value: fieldValue,
-                    inline: false
-                });
-
-                fieldCount++;
             }
 
             // إضافة آخر embed إذا كان يحتوي على حقول
@@ -88,9 +96,9 @@ module.exports = {
         } catch (error) {
             console.error('Error in servers-list command:', error);
             await interaction.editReply({
-                content: '❌ حدث خطأ أثناء جلب قائمة السيرفرات',
+                content: `❌ حدث خطأ أثناء جلب قائمة السيرفرات: ${error.message}`,
                 ephemeral: true
             });
         }
     },
-}; 
+};

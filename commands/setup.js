@@ -486,10 +486,11 @@ async function setupApply(interaction, shouldReply = true, options = null) {
         const existingSettings = await ApplySettings.findOne({ guildId: guild.id });
         if (existingSettings) {
             if (shouldReply) {
-                await interaction.reply({
-                    content: 'نظام التقديم موجود بالفعل!',
-                    ephemeral: true
-                });
+                await safeReply(
+                    interaction,
+                    'نظام التقديم موجود بالفعل!',
+                    { ephemeral: true }
+                );
             }
             return;
         }
@@ -499,7 +500,11 @@ async function setupApply(interaction, shouldReply = true, options = null) {
             guildId: guild.id,
             applyChannelId: applyChannel.id,
             logsChannelId: logsChannel.id,
-            staffRoleId: staffRole.id
+            staffRoleId: staffRole.id,
+            channelNames: {
+                apply: applyChannel.name,
+                logs: logsChannel.name
+            }
         });
 
         await settings.save();
@@ -557,16 +562,30 @@ async function setupApply(interaction, shouldReply = true, options = null) {
                     .setEmoji('📝')
             );
 
-        await applyChannel.send({
+        const messageResponse = await applyChannel.send({
             embeds: [applyEmbed],
             components: [applyButton]
         });
 
+        // تحديث إعدادات السيرفر بالمعرفات المحفوظة
+        await GuildSettings.updateSettings(guild.id, {
+            'features.apply.enabled': true,
+            'features.apply.channelId': applyChannel.id,
+            'features.apply.logChannelId': logsChannel.id,
+            'features.apply.staffRoleId': staffRole.id,
+            'features.apply.messageId': messageResponse.id,
+            'channels': {
+                'apply': { id: applyChannel.id, name: applyChannel.name, type: 'apply' },
+                'applyLogs': { id: logsChannel.id, name: logsChannel.name, type: 'log' }
+            }
+        });
+
         if (shouldReply) {
-            await interaction.reply({
-                content: '✅ تم إعداد نظام التقديم بنجاح!',
-                ephemeral: true
-            });
+            await safeReply(
+                interaction,
+                '✅ تم إعداد نظام التقديم بنجاح!',
+                { ephemeral: true }
+            );
         }
 
         return true;
@@ -574,10 +593,11 @@ async function setupApply(interaction, shouldReply = true, options = null) {
         console.error('Error in setupApply:', error);
         
         if (shouldReply) {
-            await interaction.reply({
-                content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
-                ephemeral: true
-            });
+            await safeReply(
+                interaction,
+                `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
+                { ephemeral: true }
+            );
         }
         
         throw error;
@@ -589,6 +609,11 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
     const selectedRole = options?.role || interaction.options.getRole('role');
 
     try {
+        // التحقق من وجود معلومات مطلوبة
+        if (!selectedRole) {
+            throw new Error('الرجاء تحديد رتبة للحضور');
+        }
+        
         // إنشاء رتبة "مسجل حضوره"
         let attendanceRole = guild.roles.cache.find(role => role.name === 'مسجل حضوره');
         if (!attendanceRole) {
@@ -637,7 +662,7 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
             .setTitle('📋 نظام الحضور')
             .setDescription('سجل حضورك وانصرافك باستخدام الأزرار أدناه')
             .setColor(0x00FF00);
-
+    
         const attendanceButtons = new ActionRowBuilder()
             .addComponents(
                 new ButtonBuilder()
@@ -651,13 +676,13 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
                     .setStyle(ButtonStyle.Danger)
                     .setEmoji('👋')
             );
-
-        await attendanceChannel.send({
+    
+        const messageResponse = await attendanceChannel.send({
             embeds: [attendanceEmbed],
             components: [attendanceButtons]
         });
-
-        // تحديث إعدادات السيرفر
+    
+        // تحديث إعدادات السيرفر مع معرّفات القنوات والرسائل
         const GuildSettings = require('../models/GuildSettings');
         await GuildSettings.updateSettings(guild.id, {
             attendanceRoleId: attendanceRole.id,
@@ -667,24 +692,64 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
             'features.attendance.channelId': attendanceChannel.id,
             'features.attendance.logChannelId': logChannel.id,
             'features.attendance.roleId': attendanceRole.id,
+            'features.attendance.messageId': messageResponse.id,
+            'channels': {
+                'attendance': { id: attendanceChannel.id, name: attendanceChannel.name, type: 'attendance' },
+                'attendanceLog': { id: logChannel.id, name: logChannel.name, type: 'log' }
+            },
             setupComplete: true
         });
-
+    
         if (shouldReply) {
-            await interaction.reply({
-                content: '✅ تم إعداد نظام الحضور بنجاح!',
-                ephemeral: true
-            });
+            await safeReply(
+                interaction,
+                '✅ تم إعداد نظام الحضور بنجاح!',
+                { ephemeral: true }
+            );
         }
     } catch (error) {
         console.error('Error in setupAttendance:', error);
         if (shouldReply) {
-            await interaction.reply({
-                content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
-                ephemeral: true
-            });
+            await safeReply(
+                interaction,
+                `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
+                { ephemeral: true }
+            );
         } else {
             throw error;
         }
+    }
+}
+
+/**
+ * تسجيل الرد بشكل آمن تجنباً لخطأ "InteractionAlreadyReplied"
+ * @param {Interaction} interaction التفاعل المطلوب الرد عليه
+ * @param {Object} content محتوى الرد
+ * @param {Object} options خيارات إضافية للرد
+ */
+async function safeReply(interaction, content, options = {}) {
+    try {
+        if (!interaction) return;
+        
+        // إذا كان التفاعل قد تم الرد عليه أو تأجيله بالفعل، نستخدم followUp
+        if (interaction.replied) {
+            return await interaction.followUp({
+                ...options,
+                content
+            });
+        } else if (interaction.deferred) {
+            return await interaction.editReply({
+                ...options,
+                content
+            });
+        } else {
+            // الرد لأول مرة
+            return await interaction.reply({
+                ...options,
+                content
+            });
+        }
+    } catch (error) {
+        console.error(`Error in safeReply: ${error.message}`);
     }
 }
