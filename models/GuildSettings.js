@@ -88,12 +88,41 @@ const guildSettingsSchema = new mongoose.Schema({
 
 // إضافة الفهارس لتحسين الأداء
 guildSettingsSchema.index({ guildId: 1 });
+// إضافة مؤشر مركب للبحث السريع عن الإعدادات مع ميزات محددة
+guildSettingsSchema.index({ guildId: 1, 'features.tickets.enabled': 1 });
+guildSettingsSchema.index({ guildId: 1, 'features.attendance.enabled': 1 });
 
-// تحديث التاريخ عند تعديل الإعدادات
+// تحديث التاريخ عند تعديل الإعدادات (تم تحسينه باستخدام pre-hook مع تجنب التحديث إذا لم يتم تغيير البيانات)
 guildSettingsSchema.pre('save', function(next) {
-    this.updatedAt = new Date();
+    // تحديث الوقت فقط إذا تم تعديل الوثيقة
+    if (this.isModified()) {
+        this.updatedAt = new Date();
+    }
     next();
 });
+
+// إضافة طريقة ساكنة للحصول على الإعدادات مع استخدام التخزين المؤقت الداخلي لمونغوس
+guildSettingsSchema.statics.getSettings = async function(guildId, fields) {
+    const projection = fields ? fields.split(' ').reduce((obj, field) => {
+        obj[field] = 1;
+        return obj;
+    }, {}) : null;
+    
+    return this.findOne({ guildId }, projection).lean();
+};
+
+// إضافة طريقة للتحديث المباشر بدلاً من findOne ثم save
+guildSettingsSchema.statics.updateSettings = async function(guildId, updateData) {
+    const result = await this.updateOne(
+        { guildId }, 
+        { 
+            $set: { ...updateData, updatedAt: new Date() }
+        },
+        { upsert: true }
+    );
+    
+    return result;
+};
 
 const GuildSettings = mongoose.model('GuildSettings', guildSettingsSchema);
 
