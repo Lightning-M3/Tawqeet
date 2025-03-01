@@ -708,6 +708,16 @@ client.on(Events.ChannelDelete, async (channel) => {
                         await systemChannel.send({
                             content: `⚠️ تنبيه: تم حذف قناة مهمة (${channelName}). يرجى استخدام أمر \`/setup\` لإعادة تكوين النظام.`
                         });
+                        
+                        // محاولة إعادة تسمية القناة (اختياري - إذا كان لدى البوت صلاحيات)
+                        try {
+                            await newChannel.setName(oldChannel.name, 'استعادة اسم قناة مهمة للبوت');
+                            await systemChannel.send({
+                                content: `✅ تمت إعادة تسمية القناة إلى "${oldChannel.name}" للحفاظ على وظائف البوت.`
+                            });
+                        } catch (renameError) {
+                            logger.error(`Cannot rename channel back to ${oldChannel.name}:`, renameError);
+                        }
                     }
                 } catch (notifyError) {
                     logger.error('Error sending notification about deleted channel:', notifyError);
@@ -1151,105 +1161,159 @@ async function handleCheckIn(interaction) {
             ephemeral: true
         });
 
-        // استخدام الدالة الجديدة للتحقق من السجلات
-        const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
+        try {
+            // استخدام الدالة الجديدة للتحقق من السجلات
+            const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
+            
+            // متغير للاحتفاظ بحالة نجاح العملية
+            let sessionCreated = false;
+            let updatedRecord = null;
 
-        if (attendanceRecord) {
-            // التحقق من عدم وجود جلسة مفتوحة
-            const hasOpenSession = attendanceRecord.sessions.some(session => !session.checkOut);
-            if (hasOpenSession) {
-                attendanceLocks.delete(userId);
-                return await interaction.followUp({
-                    content: '❌ لديك جلسة حضور مفتوحة بالفعل',
-                    ephemeral: true
+            if (attendanceRecord) {
+                // التحقق من عدم وجود جلسة مفتوحة
+                const hasOpenSession = attendanceRecord.sessions.some(session => !session.checkOut);
+                if (hasOpenSession) {
+                    attendanceLocks.delete(userId);
+                    return await interaction.followUp({
+                        content: '❌ لديك جلسة حضور مفتوحة بالفعل',
+                        ephemeral: true
+                    });
+                }
+                
+                // إضافة جلسة جديدة إلى السجل الموجود
+                attendanceRecord.sessions.push({
+                    checkIn: convertToRiyadhTime(new Date()),
+                    duration: 0
                 });
-            }
-            
-            // إضافة جلسة جديدة إلى السجل الموجود
-            attendanceRecord.sessions.push({
-                checkIn: convertToRiyadhTime(new Date()),
-                duration: 0
-            });
-            
-            // حفظ التغييرات
-            await attendanceRecord.save();
-        } else {
-            // استخدام updateAttendance بدلاً من createAttendance لتجنب تكرار المفتاح
-            await retryOperation(async () => {
+                
+                // حفظ التغييرات وانتظار النتيجة
+                updatedRecord = await attendanceRecord.save();
+                // التحقق من نجاح العملية من خلال وجود سجل محدث
+                sessionCreated = updatedRecord && updatedRecord.sessions && 
+                                updatedRecord.sessions.some(session => !session.checkOut);
+            } else {
+                // استخدام updateAttendance بدلاً من createAttendance لتجنب تكرار المفتاح
                 const now = convertToRiyadhTime(new Date());
                 const today = new Date(now);
                 today.setUTCHours(0, 0, 0, 0);
                 
-                return await Attendance.updateAttendance(
-                    interaction.user.id,
-                    interaction.guild.id,
-                    today,
-                    {
-                        checkIn: now,
-                        duration: 0
+                updatedRecord = await retryOperation(async () => {
+                    return await Attendance.updateAttendance(
+                        interaction.user.id,
+                        interaction.guild.id,
+                        today,
+                        {
+                            checkIn: now,
+                            duration: 0
+                        }
+                    );
+                });
+                
+                // التحقق من نجاح العملية من خلال وجود سجل محدث
+                sessionCreated = updatedRecord && updatedRecord.sessions && 
+                                updatedRecord.sessions.some(session => !session.checkOut);
+            }
+            
+            // التحقق من نجاح تسجيل الحضور قبل إرسال رسالة النجاح
+            if (sessionCreated) {
+                // تحديث التخزين المؤقت
+                cacheUserAttendance(userId, interaction.guild.id, updatedRecord);
+                
+                // إرسال رسالة النجاح للمستخدم
+                await interaction.followUp({
+                    content: '✅ تم تسجيل حضورك بنجاح!',
+                    ephemeral: true
+                });
+                
+                // تسجيل حدث نجاح تسجيل الحضور
+                logger.info(`User ${interaction.user.tag} (${userId}) checked in at ${new Date().toISOString()}`);
+                
+                // إعداد وإرسال رسالة في قناة سجل الحضور
+                setupAttendanceLogMessage(interaction.guild.id, interaction, 'حضور');
+                
+                // إضافة رتبة الحضور
+                try {
+                    const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+                    if (attendanceRole) {
+                        await interaction.member.roles.add(attendanceRole);
                     }
-                );
-            }).catch(err => {
-                logger.error('Error creating attendance record:', err);
-                throw new Error('فشل في إنشاء سجل الحضور');
-            });
-        }
+                } catch (roleError) {
+                    logger.warn(`فشل إضافة رتبة الحضور للمستخدم ${userId}:`, roleError);
+                }
 
-        // إضافة رتبة الحضور
-        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
-        if (attendanceRole) {
-            await interaction.member.roles.add(attendanceRole);
-        }
+                // تسجيل في قناة السجلات
+                try {
+                    const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+                    if (logChannel) {
+                        await logChannel.send({
+                            embeds: [{
+                                title: '✅ تسجيل حضور',
+                                description: `${interaction.user} سجل حضوره`,
+                                fields: [{
+                                    name: 'وقت الحضور',
+                                    value: formatTimeInRiyadh(new Date())
+                                }],
+                                color: 0x00ff00,
+                                timestamp: new Date()
+                            }]
+                        });
+                    }
+                } catch (channelError) {
+                    logger.warn(`فشل إرسال رسالة لقناة سجل الحضور للمستخدم ${userId}:`, channelError);
+                }
 
-        // تسجيل في قناة السجلات
-        const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
-        if (logChannel) {
-            await logChannel.send({
-                embeds: [{
-                    title: '✅ تسجيل حضور',
-                    description: `${interaction.user} سجل حضوره`,
-                    fields: [{
-                        name: 'وقت الحضور',
-                        value: formatTimeInRiyadh(new Date())
-                    }],
-                    color: 0x00ff00,
-                    timestamp: new Date()
-                }]
-            });
-        }
+                // إضافة نقاط الحضور
+                let pointsResult = null;
+                try {
+                    if (PointsManager && PointsManager.POINTS_CONFIG && PointsManager.POINTS_CONFIG.ATTENDANCE) {
+                        pointsResult = await PointsManager.addPoints(
+                            interaction.user.id,
+                            interaction.guild.id,
+                            PointsManager.POINTS_CONFIG.ATTENDANCE.CHECK_IN,
+                            'تسجيل حضور'
+                        );
+                    }
+                } catch (pointsError) {
+                    logger.warn(`فشل إضافة نقاط للمستخدم ${userId}:`, pointsError);
+                }
 
-        // إضافة نقاط الحضور
-        if (PointsManager && PointsManager.POINTS_CONFIG && PointsManager.POINTS_CONFIG.ATTENDANCE) {
-            const pointsResult = await PointsManager.addPoints(
-                interaction.user.id,
-                interaction.guild.id,
-                PointsManager.POINTS_CONFIG.ATTENDANCE.CHECK_IN,
-                'تسجيل حضور'
-            );
+                // تحديث الرد ليشمل النقاط
+                let replyContent = '✅ تم تسجيل حضورك بنجاح!';
+                if (pointsResult && pointsResult.leveledUp) {
+                    replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
+                }
 
-            // تحديث الرد ليشمل النقاط
-            let replyContent = '✅ تم تسجيل حضورك بنجاح';
-            if (pointsResult.leveledUp) {
-                replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
-            };
-
+                // إرسال رسالة النجاح النهائية للمستخدم
+                await interaction.followUp({
+                    content: replyContent,
+                    ephemeral: true
+                });
+                
+            } else {
+                // إذا فشلت عملية تسجيل الحضور
+                attendanceLocks.delete(userId);
+                await interaction.followUp({
+                    content: '❌ حدث خطأ في تسجيل الحضور: لم يتم إنشاء جلسة',
+                    ephemeral: true
+                });
+                logger.error(`Failed to create attendance session for user ${userId} in guild ${interaction.guild.id}`);
+            }
+        } catch (error) {
+            logger.error('Error creating attendance record:', error);
             await interaction.followUp({
-                content: replyContent,
+                content: `❌ حدث خطأ في تسجيل الحضور: ${error.message}`,
                 ephemeral: true
             });
-        } else {
-            throw new Error('نظام النقاط غير معرف بشكل صحيح.');
+        } finally {
+            // إزالة القفل بعد الانتهاء من العملية
+            attendanceLocks.delete(userId);
         }
-
     } catch (error) {
         logger.error('Error in check-in:', error);
         await interaction.followUp({
             content: '❌ حدث خطأ أثناء تسجيل الحضور',
             ephemeral: true
         });
-    } finally {
-        // إزالة القفل بعد الانتهاء
-        attendanceLocks.delete(userId);
     }
 }
 
@@ -1278,6 +1342,9 @@ function formatSessionDuration(checkIn, checkOut) {
 
 // تحديث دالة تسجيل الانصراف
 async function handleCheckOut(interaction) {
+    const userId = interaction.user.id;
+    const guildId = interaction.guild.id;
+    
     try {
         // إرسال رد فوري للمستخدم
         await interaction.reply({
@@ -1285,119 +1352,218 @@ async function handleCheckOut(interaction) {
             ephemeral: true
         });
 
-        const { attendanceRecord } = await checkAttendanceAndLeave(interaction.user.id, interaction.guild.id);
-
-        if (!attendanceRecord || !attendanceRecord.sessions.length) {
+        // البحث عن سجل الحضور
+        const { attendanceRecord } = await checkAttendanceAndLeave(userId, guildId);
+        
+        // تسجيل معلومات إضافية للتشخيص
+        logger.info(`محاولة تسجيل انصراف: المستخدم ${userId} في السيرفر ${guildId}. تم العثور على سجل: ${!!attendanceRecord}`);
+        
+        // التحقق من وجود سجل الحضور
+        if (!attendanceRecord) {
+            // البحث عن آخر سجل تم إنشاؤه اليوم بغض النظر عن تفاصيله
+            const today = new Date();
+            today.setUTCHours(0, 0, 0, 0);
+            const tomorrow = new Date(today);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            
+            // محاولة البحث مباشرة في قاعدة البيانات
+            const allRecordsToday = await Attendance.find({ 
+                userId, 
+                guildId,
+                date: { $gte: today, $lt: tomorrow }
+            });
+            
+            if (allRecordsToday && allRecordsToday.length > 0) {
+                logger.info(`تم العثور على ${allRecordsToday.length} سجل حضور لليوم الحالي للمستخدم ${userId}`);
+                
+                // البحث عن آخر سجل له جلسة مفتوحة
+                const recordWithOpenSession = allRecordsToday.find(record => 
+                    record.sessions && record.sessions.length > 0 && 
+                    record.sessions.some(session => !session.checkOut)
+                );
+                
+                if (recordWithOpenSession) {
+                    logger.info(`تم العثور على سجل بجلسة مفتوحة للمستخدم ${userId}`);
+                    
+                    // استخدام السجل الذي تم العثور عليه
+                    const openSession = recordWithOpenSession.sessions.find(session => !session.checkOut);
+                    
+                    // تحديث وقت الانصراف
+                    openSession.checkOut = convertToRiyadhTime(new Date());
+                    openSession.duration = Math.round((openSession.checkOut - openSession.checkIn) / 1000 / 60);
+                    
+                    // حفظ التحديث
+                    await recordWithOpenSession.save();
+                    
+                    // إكمال عملية تسجيل الانصراف
+                    await completeCheckOut(interaction, recordWithOpenSession, openSession);
+                    return;
+                } else {
+                    logger.warn(`تم العثور على سجلات حضور ولكن بدون جلسة مفتوحة للمستخدم ${userId}`);
+                }
+            }
+            
             return await interaction.followUp({
-                content: '❌ لم يتم العثور على جلسة حضور مفتوحة',
+                content: '❌ لم يتم العثور على جلسة حضور مفتوحة. هل قمت بتسجيل الحضور اليوم؟',
                 ephemeral: true
             });
         }
 
+        // التحقق من وجود جلسات في السجل
+        if (!attendanceRecord.sessions || attendanceRecord.sessions.length === 0) {
+            logger.warn(`تم العثور على سجل حضور بدون جلسات للمستخدم ${userId}`);
+            return await interaction.followUp({
+                content: '❌ لم يتم العثور على جلسات حضور في السجل. يرجى تسجيل الحضور أولاً.',
+                ephemeral: true
+            });
+        }
+
+        // البحث عن آخر جلسة مفتوحة
         const lastSession = attendanceRecord.sessions[attendanceRecord.sessions.length - 1];
+        
+        // إذا كانت آخر جلسة مغلقة، البحث عن أي جلسة مفتوحة
         if (lastSession.checkOut) {
+            const openSession = attendanceRecord.sessions.find(session => !session.checkOut);
+            
+            if (openSession) {
+                // تحديث وقت الانصراف للجلسة المفتوحة
+                openSession.checkOut = convertToRiyadhTime(new Date());
+                openSession.duration = Math.round((openSession.checkOut - openSession.checkIn) / 1000 / 60);
+                
+                await retryOperation(async () => {
+                    return await attendanceRecord.save();
+                });
+                
+                await completeCheckOut(interaction, attendanceRecord, openSession);
+                return;
+            }
+            
             return await interaction.followUp({
-                content: '❌ ليس لديك جلسة حضور مفتوحة',
+                content: '❌ ليس لديك جلسة حضور مفتوحة. تم إغلاق جميع الجلسات سابقاً.',
                 ephemeral: true
             });
         }
 
-        // تحديث وقت الانصراف بتوقيت مكة
+        // تحديث وقت الانصراف بتوقيت الرياض
         lastSession.checkOut = convertToRiyadhTime(new Date());
-        const duration = formatSessionDuration(lastSession.checkIn, lastSession.checkOut);
         lastSession.duration = Math.round((lastSession.checkOut - lastSession.checkIn) / 1000 / 60);
 
+        // حفظ التحديثات على السجل
         await retryOperation(async () => {
             return await attendanceRecord.save();
         });
 
+        // إكمال عملية تسجيل الانصراف
+        await completeCheckOut(interaction, attendanceRecord, lastSession);
+
+    } catch (error) {
+        logger.error('Error in check-out:', error);
+        await interaction.followUp({
+            content: `❌ حدث خطأ أثناء تسجيل الانصراف: ${error.message}`,
+            ephemeral: true
+        });
+    }
+}
+
+// دالة مساعدة لإكمال عملية تسجيل الانصراف
+async function completeCheckOut(interaction, attendanceRecord, session) {
+    try {
         // تحديث تحليل الأداء
         await PerformanceAnalyzer.updateUserPerformance(
             interaction.user.id,
             interaction.guild.id
         );
 
-        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
-        if (attendanceRole) {
-            await interaction.member.roles.remove(attendanceRole);
+        // إزالة رتبة الحضور
+        try {
+            const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+            if (attendanceRole) {
+                await interaction.member.roles.remove(attendanceRole);
+            }
+        } catch (roleError) {
+            logger.warn(`فشل إزالة رتبة الحضور للمستخدم ${interaction.user.id}:`, roleError);
         }
 
+        // حساب مدة الجلسة
+        const duration = formatSessionDuration(session.checkIn, session.checkOut);
+        
         // تسجيل في قناة السجلات
-        const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
-        if (logChannel) {
-            const checkInTime = formatTimeInRiyadh(lastSession.checkIn);
-            const checkOutTime = formatTimeInRiyadh(lastSession.checkOut);
+        try {
+            const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+            if (logChannel) {
+                const checkInTime = formatTimeInRiyadh(session.checkIn);
+                const checkOutTime = formatTimeInRiyadh(session.checkOut);
 
-            await logChannel.send({
-                embeds: [{
-                    title: '⏹️ تسجيل انصراف',
-                    description: `${interaction.user} سجل انصرافه`,
-                    fields: [
-                        {
-                            name: 'وقت الحضور',
-                            value: checkInTime,
-                            inline: true
-                        },
-                        {
-                            name: 'وقت الانصراف',
-                            value: checkOutTime,
-                            inline: true
-                        },
-                        {
-                            name: 'المدة',
-                            value: duration,
-                            inline: true
-                        }
-                    ],
-                    color: 0xff0000,
-                    timestamp: new Date()
-                }]
-            });
+                await logChannel.send({
+                    embeds: [{
+                        title: '⏹️ تسجيل انصراف',
+                        description: `${interaction.user} سجل انصرافه`,
+                        fields: [
+                            {
+                                name: 'وقت الحضور',
+                                value: checkInTime,
+                                inline: true
+                            },
+                            {
+                                name: 'وقت الانصراف',
+                                value: checkOutTime,
+                                inline: true
+                            },
+                            {
+                                name: 'المدة',
+                                value: duration,
+                                inline: true
+                            }
+                        ],
+                        color: 0xff0000,
+                        timestamp: new Date()
+                    }]
+                });
+            }
+        } catch (channelError) {
+            logger.warn(`فشل إرسال رسالة لقناة سجل الانصراف للمستخدم ${interaction.user.id}:`, channelError);
+        }
+
+        // إضافة نقاط الحضور
+        let pointsResult = null;
+        try {
+            if (PointsManager && PointsManager.POINTS_CONFIG && PointsManager.POINTS_CONFIG.ATTENDANCE) {
+                pointsResult = await PointsManager.addPoints(
+                    interaction.user.id,
+                    interaction.guild.id,
+                    PointsManager.POINTS_CONFIG.ATTENDANCE.FULL_DAY,
+                    'إكمال يوم كامل'
+                );
+            }
+        } catch (pointsError) {
+            logger.warn(`فشل إضافة نقاط للمستخدم ${interaction.user.id}:`, pointsError);
+        }
+
+        // إرسال رسالة التأكيد النهائية
+        let replyContent = `✅ تم تسجيل انصرافك بنجاح!\nمدة الجلسة: ${duration}`;
+        if (pointsResult && pointsResult.leveledUp) {
+            replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
+        } else if (pointsResult) {
+            replyContent += `\n✨ تم إضافة ${PointsManager.POINTS_CONFIG.ATTENDANCE.FULL_DAY} نقطة لحسابك!`;
         }
 
         await interaction.followUp({
             embeds: [{
-                title: '✅ تم تسجيل انصرافك',
-                description: `مدة الجلسة: ${duration}`,
+                title: '✅ تم تسجيل انصرافك بنجاح',
+                description: replyContent,
                 color: 0x00ff00,
                 timestamp: new Date()
             }],
             ephemeral: true
         });
-
+        
+        // تحديث سجل الحضور في الذاكرة المؤقتة
+        cacheUserAttendance(interaction.user.id, interaction.guild.id, attendanceRecord);
+        
     } catch (error) {
-        logger.error('Error in check-out:', error);
-        await interaction.followUp({
-            content: '❌ حدث خطأ أثناء تسجيل الانصراف',
-            ephemeral: true
-        });
+        logger.error('Error completing check-out process:', error);
+        throw error;
     }
-}
-
-// تحديث دالة حساب مدة الجلسة
-function formatSessionDuration(checkIn, checkOut) {
-    const duration = moment(checkOut).diff(moment(checkIn));
-    const minutes = Math.floor(duration / 1000 / 60);
-    
-    if (minutes < 1) {
-        return "أقل من دقيقة";
-    }
-    
-    const hours = Math.floor(minutes / 60);
-    const remainingMinutes = minutes % 60;
-    
-    let durationText = [];
-    
-    if (hours > 0) {
-        durationText.push(formatArabicTime(hours, 'ساعة', 'ساعتان', 'ساعات'));
-    }
-    
-    if (remainingMinutes > 0) {
-        if (durationText.length > 0) durationText.push('و');
-        durationText.push(formatArabicTime(remainingMinutes, 'دقيقة', 'دقيقتان', 'دقائق'));
-    }
-    
-    return durationText.join(' ');
 }
 
 // =============== الدوال المساعدة ==================
@@ -1475,7 +1641,7 @@ async function handleInteractionError(interaction, error, context = {}) {
     }
 }
 
-// دالة لتنظيف الذاكرة المؤقتة
+// دالة تنظيف الذاكرة المؤقتة
 function cleanupCache() {
     const now = Date.now();
     

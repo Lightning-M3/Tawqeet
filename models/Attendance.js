@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const logger = require('../utils/logger'); // تصحيح مسار استيراد مكتبة التسجيل
 
 const attendanceSchema = new mongoose.Schema({
   userId: { type: String, required: true },
@@ -108,29 +109,27 @@ attendanceSchema.statics.createAttendance = async function(userId, guildId, chec
 // إضافة طريقة ساكنة للتحديث المباشر للكفاءة
 attendanceSchema.statics.updateAttendance = async function(userId, guildId, date, sessionData) {
   try {
-    // تحديث سجل الحضور باستخدام جلسة جديدة بطريقة آمنة تتجنب مشكلة تكرار المفتاح
-    const options = { 
-      new: true, 
-      upsert: true,
-      // استخدام runValidators لضمان صحة البيانات
-      runValidators: true,
-      // تعيين setDefaultsOnInsert لاستخدام القيم الافتراضية فقط عند الإنشاء
-      setDefaultsOnInsert: true
-    };
-    
+    // تأكيد أن جميع البيانات المطلوبة متوفرة
+    if (!userId || !guildId || !date || !sessionData) {
+      throw new Error('بيانات غير كاملة لتحديث سجل الحضور');
+    }
+
     // التحقق من وجود سجل قبل عملية التحديث
     const existingRecord = await this.findOne({ userId, guildId, date });
     
+    let result = null;
+    
     if (existingRecord) {
       // إذا كان السجل موجودًا، فقط نضيف الجلسة الجديدة
-      return await this.findOneAndUpdate(
-        { userId, guildId, date },
-        { 
-          $push: { sessions: sessionData },
-          $set: { lastUpdated: new Date() }
-        },
-        { new: true }
-      );
+      existingRecord.sessions.push(sessionData);
+      existingRecord.lastUpdated = new Date();
+      // محاولة حفظ التعديلات
+      result = await existingRecord.save();
+      
+      // التحقق من نجاح العملية
+      if (!result) {
+        throw new Error('فشل حفظ سجل الحضور الموجود');
+      }
     } else {
       // إذا لم يكن السجل موجودًا، نقوم بإنشائه
       const newRecord = new this({
@@ -141,19 +140,46 @@ attendanceSchema.statics.updateAttendance = async function(userId, guildId, date
         lastUpdated: new Date()
       });
       
-      return await newRecord.save();
+      // محاولة حفظ السجل الجديد
+      result = await newRecord.save();
+      
+      // التحقق من نجاح العملية
+      if (!result) {
+        throw new Error('فشل إنشاء سجل الحضور الجديد');
+      }
     }
+    
+    // تسجيل نجاح العملية
+    logger.info(`تم تحديث سجل الحضور بنجاح للمستخدم ${userId} في السيرفر ${guildId} بتاريخ ${date}`);
+    
+    return result;
   } catch (error) {
     // معالجة خطأ تكرار المفتاح بشكل خاص
     if (error.code === 11000) {
-      // في حالة حدوث خطأ تكرار، نعيد محاولة الإضافة كتحديث بدلاً من إنشاء
+      logger.warn(`تكرار محاولة تحديث السجل للمستخدم ${userId} في السيرفر ${guildId} بتاريخ ${date}`);
+      
+      // في حالة حدوث خطأ تكرار، نعيد محاولة الإضافة كتحديث
       const record = await this.findOne({ userId, guildId, date });
       if (record) {
-        record.sessions.push(sessionData);
-        record.lastUpdated = new Date();
-        return await record.save();
+        // التحقق من وجود نفس معلومات الجلسة لتجنب التكرار
+        const sessionExists = record.sessions.some(session => 
+          session.checkIn && sessionData.checkIn && 
+          Math.abs(new Date(session.checkIn) - new Date(sessionData.checkIn)) < 60000 // تقريب لمدة دقيقة
+        );
+        
+        if (!sessionExists) {
+          record.sessions.push(sessionData);
+          record.lastUpdated = new Date();
+          return await record.save();
+        } else {
+          // إذا كانت الجلسة موجودة بالفعل، نعيد السجل الحالي دون تغيير
+          return record;
+        }
       }
     }
+    
+    // تسجيل وإعادة إرسال الخطأ
+    logger.error(`خطأ في تحديث سجل الحضور للمستخدم ${userId}: ${error.message}`, { error });
     throw error;
   }
 };
