@@ -34,7 +34,7 @@ async function updateBotPresence(client) {
             status: 'online'
         });
 
-        logger.info('Bot is now online on ${client.guilds.cache.size} servers');
+        logger.info(`Bot is now online on ${client.guilds.cache.size} servers`);
 
     } catch (error) {
         logger.error('Error updating bot presence:', {
