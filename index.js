@@ -2475,3 +2475,95 @@ process.on('uncaughtException', (error) => {
     // إعادة تشغيل البوت في حالة الأخطاء الحرجة
     process.exit(1);
 });
+
+/**
+ * إنشاء قناة تذكرة جديدة
+ * @param {Interaction} interaction - تفاعل المستخدم
+ * @param {string} content - محتوى التذكرة
+ * @returns {Promise<TextChannel>} - قناة التذكرة المنشأة
+ */
+async function createTicketChannel(interaction, content) {
+    try {
+        const { guild, user } = interaction;
+        
+        // الحصول على إعدادات السيرفر
+        const guildSettings = await retryOperation(async () => {
+            return await GuildSettings.findOne({ guildId: guild.id });
+        });
+        
+        if (!guildSettings || !guildSettings.features?.tickets?.enabled) {
+            throw new Error('نظام التذاكر غير مفعل في هذا السيرفر');
+        }
+        
+        // إنشاء اسم للقناة
+        const ticketNumber = Math.floor(Math.random() * 10000);
+        const channelName = `ticket-${user.username}-${ticketNumber}`;
+        
+        // إنشاء القناة
+        const ticketChannel = await guild.channels.create({
+            name: channelName,
+            type: ChannelType.GuildText,
+            parent: guildSettings.features.tickets.categoryId,
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: [PermissionFlagsBits.ViewChannel]
+                },
+                {
+                    id: user.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
+                },
+                {
+                    id: interaction.client.user.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels]
+                }
+            ]
+        });
+        
+        // إنشاء زر إغلاق التذكرة
+        const closeButton = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`close_ticket_${ticketChannel.id}`)
+                    .setLabel('إغلاق التذكرة')
+                    .setStyle(ButtonStyle.Danger)
+                    .setEmoji('🔒')
+            );
+        
+        // إرسال رسالة ترحيبية
+        await ticketChannel.send({
+            content: `مرحباً <@${user.id}>! تم إنشاء تذكرتك. سيقوم فريق الإدارة بالرد عليك قريباً.`,
+            components: [closeButton]
+        });
+        
+        // حفظ التذكرة في قاعدة البيانات
+        const ticket = new Ticket({
+            guildId: guild.id,
+            userId: user.id,
+            channelId: ticketChannel.id,
+            ticketId: ticketChannel.id,
+            content: content,
+            status: 'open',
+            createdAt: new Date()
+        });
+        
+        await retryOperation(async () => {
+            await ticket.save();
+        });
+        
+        // تسجيل إنشاء التذكرة
+        logger.info(`تم إنشاء تذكرة جديدة`, {
+            guildId: guild.id,
+            userId: user.id,
+            channelId: ticketChannel.id
+        });
+        
+        return ticketChannel;
+    } catch (error) {
+        logger.error('خطأ في إنشاء قناة التذكرة:', {
+            error: error.message,
+            stack: error.stack
+        });
+        throw error;
+    }
+}
