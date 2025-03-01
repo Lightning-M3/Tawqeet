@@ -591,26 +591,20 @@ client.on(Events.GuildUpdate, async (oldGuild, newGuild) => {
     try {
         logger.info(`Guild updated: ${newGuild.name} (ID: ${newGuild.id})`);
         
-        // تحديث معلومات السيرفر في قاعدة البيانات
-        const guildSettings = await retryOperation(async () => {
-            return await GuildSettings.findOne({ guildId: newGuild.id });
+        // تحديث معلومات السيرفر في قاعدة البيانات باستخدام الطريقة الآمنة
+        await retryOperation(async () => {
+            return await GuildSettings.updateGuildInfo(newGuild.id, {
+                name: newGuild.name,
+                icon: newGuild.iconURL(),
+                memberCount: newGuild.memberCount,
+                updatedAt: new Date()
+            });
         });
         
-        if (guildSettings) {
-            guildSettings.name = newGuild.name;
-            guildSettings.icon = newGuild.iconURL();
-            guildSettings.memberCount = newGuild.memberCount;
-            guildSettings.updatedAt = new Date();
-            
-            await retryOperation(async () => {
-                return await guildSettings.save();
-            });
-            
-            logger.info(`Updated guild settings for ${newGuild.name}`, {
-                guildId: newGuild.id,
-                updatedFields: ['name', 'icon', 'memberCount', 'updatedAt']
-            });
-        }
+        logger.info(`Updated guild settings for ${newGuild.name}`, {
+            guildId: newGuild.id,
+            updatedFields: ['name', 'icon', 'memberCount', 'updatedAt']
+        });
         
         // التحقق من القنوات والأدوار المهمة
         await checkCriticalChannelsAndRoles(newGuild);
@@ -1493,16 +1487,7 @@ async function setupBot() {
         await updateBotStatus();
         setupDailyReset(client);
         setInterval(cleanupCache, 3600000);
-        setInterval(async () => {
-            if (!client.isReady()) {
-                console.log('Bot disconnected. Attempting to reconnect...');
-                try {
-                    await client.login(process.env.TOKEN);
-                } catch (error) {
-                    console.error('Failed to reconnect:', error);
-                }
-            }
-        }, 300000);
+        setInterval(() => updateBotPresence(client), 3600000);
 
         console.log('Bot setup completed successfully');
     } catch (error) {

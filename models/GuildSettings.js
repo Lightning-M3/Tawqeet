@@ -8,15 +8,15 @@ const guildSettingsSchema = new mongoose.Schema({
     },
     attendanceRoleId: {
         type: String,
-        required: true
+        required: function() { return this.setupComplete === true; }
     },
     welcomeChannelId: {
         type: String,
-        required: true
+        required: function() { return this.setupComplete === true; }
     },
     logsChannelId: {
         type: String,
-        required: true
+        required: function() { return this.setupComplete === true; }
     },
     setupComplete: {
         type: Boolean,
@@ -49,19 +49,36 @@ const guildSettingsSchema = new mongoose.Schema({
             enabled: { type: Boolean, default: false },
             channelId: String,
             logChannelId: String,
+            formTitle: {
+                type: String,
+                default: 'نموذج التقديم'
+            },
+            formQuestions: [{
+                question: String,
+                type: {
+                    type: String,
+                    enum: ['text', 'number', 'date', 'choice'],
+                    default: 'text'
+                },
+                required: {
+                    type: Boolean,
+                    default: true
+                },
+                options: [String] // للأسئلة من نوع "choice"
+            }],
             staffRoleId: String
         },
         attendance: {
             enabled: { type: Boolean, default: false },
-            roleId: String,
             channelId: String,
-            schedule: {
-                start: String,
-                end: String,
-                timezone: String
-            }
+            roleId: String,
+            logChannelId: String,
+            reportChannelId: String
         }
     },
+    name: String,
+    icon: String,
+    memberCount: Number,
     errorChannelId: {
         type: String,
         default: null
@@ -86,11 +103,50 @@ const guildSettingsSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// إضافة الفهارس لتحسين الأداء
+// إضافة مؤشرات للبحث السريع
 guildSettingsSchema.index({ guildId: 1 });
-// إضافة مؤشر مركب للبحث السريع عن الإعدادات مع ميزات محددة
-guildSettingsSchema.index({ guildId: 1, 'features.tickets.enabled': 1 });
-guildSettingsSchema.index({ guildId: 1, 'features.attendance.enabled': 1 });
+guildSettingsSchema.index({ 'features.tickets.enabled': 1 });
+guildSettingsSchema.index({ 'features.welcome.enabled': 1 });
+guildSettingsSchema.index({ 'features.apply.enabled': 1 });
+guildSettingsSchema.index({ 'features.attendance.enabled': 1 });
+
+// إضافة طريقة ساكنة للحصول على الإعدادات مع استخدام التخزين المؤقت الداخلي لمونغوس
+guildSettingsSchema.statics.getSettings = async function(guildId, fields = '') {
+    try {
+        return await this.findOne({ guildId }, fields).lean();
+    } catch (error) {
+        console.error(`Error getting guild settings for ${guildId}:`, error);
+        throw new Error(`فشل الحصول على إعدادات السيرفر: ${error.message}`);
+    }
+};
+
+// إضافة طريقة للتحديث المباشر بدلاً من findOne ثم save
+guildSettingsSchema.statics.updateSettings = async function(guildId, updateData) {
+    try {
+        return await this.findOneAndUpdate(
+            { guildId },
+            { $set: updateData },
+            { new: true, upsert: true, runValidators: false }
+        );
+    } catch (error) {
+        console.error(`Error updating guild settings for ${guildId}:`, error);
+        throw new Error(`فشل تحديث إعدادات السيرفر: ${error.message}`);
+    }
+};
+
+// إضافة طريقة ساكنة للتحديث الآمن بدون عمليات التحقق من الحقول
+guildSettingsSchema.statics.updateGuildInfo = async function(guildId, updateData) {
+    try {
+        return await this.updateOne(
+            { guildId },
+            { $set: updateData },
+            { runValidators: false }
+        );
+    } catch (error) {
+        console.error(`Error updating guild info for ${guildId}:`, error);
+        throw new Error(`فشل تحديث معلومات السيرفر: ${error.message}`);
+    }
+};
 
 // تحديث التاريخ عند تعديل الإعدادات (تم تحسينه باستخدام pre-hook مع تجنب التحديث إذا لم يتم تغيير البيانات)
 guildSettingsSchema.pre('save', function(next) {
@@ -100,29 +156,6 @@ guildSettingsSchema.pre('save', function(next) {
     }
     next();
 });
-
-// إضافة طريقة ساكنة للحصول على الإعدادات مع استخدام التخزين المؤقت الداخلي لمونغوس
-guildSettingsSchema.statics.getSettings = async function(guildId, fields) {
-    const projection = fields ? fields.split(' ').reduce((obj, field) => {
-        obj[field] = 1;
-        return obj;
-    }, {}) : null;
-    
-    return this.findOne({ guildId }, projection).lean();
-};
-
-// إضافة طريقة للتحديث المباشر بدلاً من findOne ثم save
-guildSettingsSchema.statics.updateSettings = async function(guildId, updateData) {
-    const result = await this.updateOne(
-        { guildId }, 
-        { 
-            $set: { ...updateData, updatedAt: new Date() }
-        },
-        { upsert: true }
-    );
-    
-    return result;
-};
 
 const GuildSettings = mongoose.model('GuildSettings', guildSettingsSchema);
 

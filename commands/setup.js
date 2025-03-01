@@ -588,78 +588,103 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
     const guild = interaction.guild;
     const selectedRole = options?.role || interaction.options.getRole('role');
 
-    // إنشاء رتبة "مسجل حضوره"
-    let attendanceRole = guild.roles.cache.find(role => role.name === 'مسجل حضوره');
-    if (!attendanceRole) {
-        attendanceRole = await guild.roles.create({
-            name: 'مسجل حضوره',
-            color: 0x00FF00,
-            reason: 'رتبة تتبع الحضور'
+    try {
+        // إنشاء رتبة "مسجل حضوره"
+        let attendanceRole = guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        if (!attendanceRole) {
+            attendanceRole = await guild.roles.create({
+                name: 'مسجل حضوره',
+                color: 0x00FF00,
+                reason: 'رتبة تتبع الحضور'
+            });
+        }
+    
+        // إنشاء القنوات
+        const logChannel = await guild.channels.create({
+            name: 'سجل-الحضور',
+            type: 0,
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: ['ViewChannel']
+                },
+                {
+                    id: selectedRole.id,
+                    allow: ['ViewChannel'],
+                    deny: ['SendMessages']
+                }
+            ]
         });
-    }
-
-    // إنشاء القنوات
-    const logChannel = await guild.channels.create({
-        name: 'سجل-الحضور',
-        type: 0,
-        permissionOverwrites: [
-            {
-                id: guild.id,
-                deny: ['ViewChannel']
-            },
-            {
-                id: selectedRole.id,
-                allow: ['ViewChannel'],
-                deny: ['SendMessages']
-            }
-        ]
-    });
-
-    const attendanceChannel = await guild.channels.create({
-        name: 'تسجيل-الحضور',
-        type: 0,
-        permissionOverwrites: [
-            {
-                id: guild.id,
-                deny: ['ViewChannel']
-            },
-            {
-                id: selectedRole.id,
-                allow: ['ViewChannel'],
-                deny: ['SendMessages']
-            }
-        ]
-    });
-
-    // إنشاء رسالة الحضور
-    const attendanceEmbed = new EmbedBuilder()
-        .setTitle('📋 نظام الحضور')
-        .setDescription('سجل حضورك وانصرافك باستخدام الأزرار أدناه')
-        .setColor(0x00FF00);
-
-    const attendanceButtons = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('check_in')
-                .setLabel('تسجيل حضور')
-                .setStyle(ButtonStyle.Success)
-                .setEmoji('✅'),
-            new ButtonBuilder()
-                .setCustomId('check_out')
-                .setLabel('تسجيل انصراف')
-                .setStyle(ButtonStyle.Danger)
-                .setEmoji('👋')
-        );
-
-    await attendanceChannel.send({
-        embeds: [attendanceEmbed],
-        components: [attendanceButtons]
-    });
-
-    if (shouldReply) {
-        await interaction.reply({
-            content: '✅ تم إعداد نظام الحضور بنجاح!',
-            ephemeral: true
+    
+        const attendanceChannel = await guild.channels.create({
+            name: 'تسجيل-الحضور',
+            type: 0,
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: ['ViewChannel']
+                },
+                {
+                    id: selectedRole.id,
+                    allow: ['ViewChannel'],
+                    deny: ['SendMessages']
+                }
+            ]
         });
+    
+        // إنشاء رسالة الحضور
+        const attendanceEmbed = new EmbedBuilder()
+            .setTitle('📋 نظام الحضور')
+            .setDescription('سجل حضورك وانصرافك باستخدام الأزرار أدناه')
+            .setColor(0x00FF00);
+
+        const attendanceButtons = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('check_in')
+                    .setLabel('تسجيل حضور')
+                    .setStyle(ButtonStyle.Success)
+                    .setEmoji('✅'),
+                new ButtonBuilder()
+                    .setCustomId('check_out')
+                    .setLabel('تسجيل انصراف')
+                    .setStyle(ButtonStyle.Danger)
+                    .setEmoji('👋')
+            );
+
+        await attendanceChannel.send({
+            embeds: [attendanceEmbed],
+            components: [attendanceButtons]
+        });
+
+        // تحديث إعدادات السيرفر
+        const GuildSettings = require('../models/GuildSettings');
+        await GuildSettings.updateSettings(guild.id, {
+            attendanceRoleId: attendanceRole.id,
+            logsChannelId: logChannel.id,
+            welcomeChannelId: attendanceChannel.id,
+            'features.attendance.enabled': true,
+            'features.attendance.channelId': attendanceChannel.id,
+            'features.attendance.logChannelId': logChannel.id,
+            'features.attendance.roleId': attendanceRole.id,
+            setupComplete: true
+        });
+
+        if (shouldReply) {
+            await interaction.reply({
+                content: '✅ تم إعداد نظام الحضور بنجاح!',
+                ephemeral: true
+            });
+        }
+    } catch (error) {
+        console.error('Error in setupAttendance:', error);
+        if (shouldReply) {
+            await interaction.reply({
+                content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
+                ephemeral: true
+            });
+        } else {
+            throw error;
+        }
     }
 }
