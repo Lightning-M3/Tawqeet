@@ -145,7 +145,7 @@ async function setupAll(interaction) {
         let progress = '';
         
         try {
-            await setupTickets(interaction);
+            await setupTickets(interaction, false);
             progress += '✅ تم إعداد نظام التذاكر\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام التذاكر\n';
@@ -153,7 +153,7 @@ async function setupAll(interaction) {
         }
 
         try {
-            await setupWelcome(interaction);
+            await setupWelcome(interaction, false);
             progress += '✅ تم إعداد نظام الترحيب\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام الترحيب\n';
@@ -161,7 +161,7 @@ async function setupAll(interaction) {
         }
 
         try {
-            await setupApply(interaction);
+            await setupApply(interaction, false);
             progress += '✅ تم إعداد نظام التقديم\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام التقديم\n';
@@ -169,7 +169,7 @@ async function setupAll(interaction) {
         }
 
         try {
-            await setupAttendance(interaction);
+            await setupAttendance(interaction, false, { role: attendanceRole });
             progress += '✅ تم إعداد نظام الحضور\n';
         } catch (error) {
             progress += '❌ فشل إعداد نظام الحضور\n';
@@ -197,24 +197,24 @@ async function setupAll(interaction) {
     }
 }
 
-async function setupTickets(interaction) {
+async function setupTickets(interaction, shouldReply = true) {
     try {
         // التحقق من صلاحيات البوت
         const botMember = interaction.guild.members.me;
         const requiredPermissions = [
             PermissionFlagsBits.ManageChannels,
             PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.SendMessages,
-            PermissionFlagsBits.EmbedLinks
+            PermissionFlagsBits.SendMessages
         ];
 
-        const missingPermissions = requiredPermissions.filter(perm => !botMember.permissions.has(perm));
-        if (missingPermissions.length > 0) {
-            await interaction.reply({
-                content: `❌ البوت يفتقد للصلاحيات التالية: ${missingPermissions.join(", ")}`,
-                ephemeral: true
-            });
-            return;
+        for (const permission of requiredPermissions) {
+            if (!botMember.permissions.has(permission)) {
+                throw new Error(`البوت يفتقد للصلاحيات المطلوبة`);
+            }
+        }
+
+        if (shouldReply && !interaction.deferred) {
+            await interaction.deferReply({ ephemeral: true });
         }
 
         // التحقق من وجود القنوات مسبقاً
@@ -224,14 +224,14 @@ async function setupTickets(interaction) {
         );
 
         if (existingCategory) {
-            await interaction.reply({
-                content: '❌ نظام التذاكر موجود بالفعل!',
-                ephemeral: true
-            });
+            if (shouldReply) {
+                await interaction.reply({
+                    content: '❌ نظام التذاكر موجود بالفعل!',
+                    ephemeral: true
+                });
+            }
             return;
         }
-
-        await interaction.deferReply({ ephemeral: true });
 
         // إنشاء الفئة والقنوات
         const category = await interaction.guild.channels.create({
@@ -321,11 +321,12 @@ async function setupTickets(interaction) {
             components: [ticketButton]
         });
 
-        await interaction.editReply({
-            content: '✅ تم إعداد نظام التذاكر بنجاح!',
-            ephemeral: true
-        });
-
+        if (shouldReply) {
+            await interaction.editReply({
+                content: '✅ تم إعداد نظام التذاكر بنجاح!',
+                ephemeral: true
+            });
+        }
     } catch (error) {
         console.error('Error in setupTickets:', error);
         
@@ -333,16 +334,18 @@ async function setupTickets(interaction) {
             ? '❌ البوت يفتقد للصلاحيات اللازمة لإعداد نظام التذاكر'
             : '❌ حدث خطأ أثناء إعداد نظام التذاكر. الرجاء المحاولة مرة أخرى.';
 
-        if (interaction.deferred) {
-            await interaction.editReply({
-                content: errorMessage,
-                ephemeral: true
-            });
-        } else {
-            await interaction.reply({
-                content: errorMessage,
-                ephemeral: true
-            });
+        if (shouldReply) {
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: errorMessage,
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: errorMessage,
+                    ephemeral: true
+                });
+            }
         }
     }
 }
@@ -351,71 +354,47 @@ async function setupWelcome(interaction, shouldReply = true) {
     const guild = interaction.guild;
     
     try {
-        // التحقق من الصلاحيات المطلوبة
-        const requiredPermissions = ['ManageChannels', 'ViewChannel', 'SendMessages', 'EmbedLinks'];
-        const botMember = await guild.members.fetchMe();
-        
-        const missingPermissions = requiredPermissions.filter(perm => 
-            !botMember.permissions.has(perm)
-        );
-
-        if (missingPermissions.length > 0) {
-            throw new Error(`البوت يفتقد للصلاحيات التالية: ${missingPermissions.join(', ')}`);
-        }
-
-        // التحقق من وجود قناة الترحيب
-        const existingChannel = guild.channels.cache.find(c => 
-            c.type === ChannelType.GuildText && 
-            c.name === '👋〡・الترحيب'
-        );
-
-        if (existingChannel) {
-            if (shouldReply) {
-                await interaction.reply({
-                    content: 'قناة الترحيب موجودة بالفعل!',
-                    ephemeral: true
-                });
-            }
-            return;
+        // التحقق من صلاحيات البوت
+        const botMember = interaction.guild.members.me;
+        if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            throw new Error('البوت لا يملك صلاحية إدارة القنوات');
         }
 
         // إنشاء قناة الترحيب
-        const welcomeChannel = await guild.channels.create({
+        const welcomeChannel = await interaction.guild.channels.create({
             name: '👋〡・الترحيب',
             type: ChannelType.GuildText,
             permissionOverwrites: [
                 {
-                    id: guild.id,
+                    id: interaction.guild.id,
                     allow: [PermissionFlagsBits.ViewChannel],
                     deny: [PermissionFlagsBits.SendMessages]
                 },
                 {
-                    id: botMember.id,
-                    allow: [
-                        PermissionFlagsBits.ViewChannel,
-                        PermissionFlagsBits.SendMessages,
-                        PermissionFlagsBits.EmbedLinks
-                    ]
+                    id: interaction.client.user.id,
+                    allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]
                 }
             ]
         });
 
-        // إنشاء رسالة الترحيب
-        const welcomeEmbed = new EmbedBuilder()
-            .setTitle(`👋 مرحباً بكم في ${guild.name}`)
-            .setDescription('نتمنى لكم وقتاً ممتعاً!')
-            .setColor(0x2B2D31)
-            .setFooter({ text: guild.name, iconURL: guild.iconURL() });
+        // تحديث إعدادات السيرفر
+        await GuildSettings.updateSettings(interaction.guild.id, {
+            welcomeChannelId: welcomeChannel.id
+        }, { upsert: true });
 
-        await welcomeChannel.send({
-            embeds: [welcomeEmbed]
-        });
-
+        // الرد على المستخدم فقط إذا كان مطلوبًا وليس هناك رد مسبق
         if (shouldReply) {
-            await interaction.reply({
-                content: '✅ تم إعداد نظام الترحيب بنجاح!',
-                ephemeral: true
-            });
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: '✅ تم إعداد نظام الترحيب بنجاح!',
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: '✅ تم إعداد نظام الترحيب بنجاح!',
+                    ephemeral: true
+                });
+            }
         }
 
         return true;
@@ -423,10 +402,17 @@ async function setupWelcome(interaction, shouldReply = true) {
         console.error('Error in setupWelcome:', error);
         
         if (shouldReply) {
-            await interaction.reply({
-                content: `❌ حدث خطأ أثناء إعداد نظام الترحيب: ${error.message}`,
-                ephemeral: true
-            });
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: `❌ حدث خطأ أثناء إعداد نظام الترحيب: ${error.message}`,
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: `❌ حدث خطأ أثناء إعداد نظام الترحيب: ${error.message}`,
+                    ephemeral: true
+                });
+            }
         }
         
         throw error;
@@ -434,120 +420,82 @@ async function setupWelcome(interaction, shouldReply = true) {
 }
 
 async function setupApply(interaction, shouldReply = true, options = null) {
-    const guild = interaction.guild;
-    
     try {
-        // التحقق من الصلاحيات المطلوبة
-        const requiredPermissions = ['ManageChannels', 'ViewChannel', 'SendMessages', 'EmbedLinks', 'ManageRoles'];
-        const botMember = await guild.members.fetchMe();
-        
-        const missingPermissions = requiredPermissions.filter(perm => 
-            !botMember.permissions.has(perm)
-        );
-
-        if (missingPermissions.length > 0) {
-            throw new Error(`البوت يفتقد للصلاحيات التالية: ${missingPermissions.join(', ')}`);
-        }
-
-        // الحصول على القنوات والأدوار المطلوبة
+        const guild = interaction.guild;
         const applyChannel = options?.applyChannel || interaction.options.getChannel('apply_channel');
         const logsChannel = options?.logsChannel || interaction.options.getChannel('apply_logs');
         const staffRole = options?.staffRole || interaction.options.getRole('staff_role');
 
-        // التحقق من صحة المدخلات
+        // التحقق من توفر المعلومات المطلوبة
         if (!applyChannel || !logsChannel || !staffRole) {
-            throw new Error('بعض المعلومات المطلوبة غير متوفرة');
+            throw new Error('القنوات أو الرتبة المطلوبة غير متوفرة');
         }
 
-        if (applyChannel.type !== ChannelType.GuildText || logsChannel.type !== ChannelType.GuildText) {
-            throw new Error('يجب أن تكون القنوات المحددة من نوع نصي');
+        // إنشاء قسم الطلبات إذا لم يكن موجوداً
+        let applyCategory = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === '📝 نظام التقديم');
+        if (!applyCategory) {
+            applyCategory = await guild.channels.create({
+                name: '📝 نظام التقديم',
+                type: ChannelType.GuildCategory
+            });
         }
 
-        // التحقق من عدم وجود إعدادات سابقة
-        const existingSettings = await ApplySettings.findOne({ guildId: guild.id });
-        if (existingSettings) {
-            if (shouldReply) {
-                await interaction.reply({
-                    content: 'نظام التقديم موجود بالفعل!',
-                    ephemeral: true
-                });
-            }
-            return;
-        }
-
-        // حفظ الإعدادات في قاعدة البيانات
-        const settings = new ApplySettings({
-            guildId: guild.id,
-            applyChannelId: applyChannel.id,
-            logsChannelId: logsChannel.id,
-            staffRoleId: staffRole.id
+        // تعيين الصلاحيات لقناة التقديم
+        await applyChannel.setParent(applyCategory.id, { lockPermissions: false });
+        await applyChannel.permissionOverwrites.edit(guild.id, {
+            ViewChannel: true,
+            SendMessages: false
         });
 
-        await settings.save();
+        // تعيين الصلاحيات لقناة السجلات
+        await logsChannel.setParent(applyCategory.id, { lockPermissions: false });
+        await logsChannel.permissionOverwrites.edit(guild.id, {
+            ViewChannel: false
+        });
+        await logsChannel.permissionOverwrites.edit(staffRole.id, {
+            ViewChannel: true
+        });
 
-        // إعداد قناة التقديم
-        await applyChannel.permissionOverwrites.set([
-            {
-                id: guild.id,
-                allow: [PermissionFlagsBits.ViewChannel],
-                deny: [PermissionFlagsBits.SendMessages]
-            },
-            {
-                id: botMember.id,
-                allow: [
-                    PermissionFlagsBits.ViewChannel,
-                    PermissionFlagsBits.SendMessages,
-                    PermissionFlagsBits.EmbedLinks
-                ]
-            }
-        ]);
+        // تحديث الإعدادات في قاعدة البيانات
+        await GuildSettings.updateSettings(guild.id, {
+            applyChannelId: applyChannel.id,
+            applyLogsChannelId: logsChannel.id,
+            staffRoleId: staffRole.id
+        }, { upsert: true });
 
-        // إعداد قناة السجلات
-        await logsChannel.permissionOverwrites.set([
-            {
-                id: guild.id,
-                deny: [PermissionFlagsBits.ViewChannel]
-            },
-            {
-                id: staffRole.id,
-                allow: [PermissionFlagsBits.ViewChannel]
-            },
-            {
-                id: botMember.id,
-                allow: [
-                    PermissionFlagsBits.ViewChannel,
-                    PermissionFlagsBits.SendMessages,
-                    PermissionFlagsBits.EmbedLinks
-                ]
-            }
-        ]);
+        // إرسال زر التقديم
+        const applyButton = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('apply_button')
+                .setLabel('تقديم طلب')
+                .setStyle(ButtonStyle.Primary)
+                .setEmoji('📝')
+        );
 
-        // إنشاء رسالة التقديم
         const applyEmbed = new EmbedBuilder()
-            .setTitle('📝 نظام التقديم')
-            .setDescription('اضغط على الزر أدناه لتقديم طلبك')
-            .setColor(0x2B2D31)
-            .setFooter({ text: guild.name, iconURL: guild.iconURL() });
-
-        const applyButton = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId('apply_button')
-                    .setLabel('تقديم طلب')
-                    .setStyle(ButtonStyle.Primary)
-                    .setEmoji('📝')
-            );
+            .setTitle('نظام التقديم')
+            .setDescription('اضغط على الزر أدناه للتقديم')
+            .setColor('#0099ff')
+            .setTimestamp();
 
         await applyChannel.send({
             embeds: [applyEmbed],
             components: [applyButton]
         });
 
+        // الرد على المستخدم فقط إذا كان مطلوبًا وليس هناك رد مسبق
         if (shouldReply) {
-            await interaction.reply({
-                content: '✅ تم إعداد نظام التقديم بنجاح!',
-                ephemeral: true
-            });
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: '✅ تم إعداد نظام التقديم بنجاح!',
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: '✅ تم إعداد نظام التقديم بنجاح!',
+                    ephemeral: true
+                });
+            }
         }
 
         return true;
@@ -555,10 +503,17 @@ async function setupApply(interaction, shouldReply = true, options = null) {
         console.error('Error in setupApply:', error);
         
         if (shouldReply) {
-            await interaction.reply({
-                content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
-                ephemeral: true
-            });
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
+                    ephemeral: true
+                });
+            }
         }
         
         throw error;
@@ -568,79 +523,136 @@ async function setupApply(interaction, shouldReply = true, options = null) {
 async function setupAttendance(interaction, shouldReply = true, options = null) {
     const guild = interaction.guild;
     const selectedRole = options?.role || interaction.options.getRole('role');
-
-    // إنشاء رتبة "مسجل حضوره"
-    let attendanceRole = guild.roles.cache.find(role => role.name === 'مسجل حضوره');
-    if (!attendanceRole) {
-        attendanceRole = await guild.roles.create({
-            name: 'مسجل حضوره',
-            color: 0x00FF00,
-            reason: 'رتبة تتبع الحضور'
-        });
+    if (!selectedRole) {
+        const errorMessage = 'الرتبة المطلوبة غير متوفرة لإعداد نظام الحضور';
+        console.error(errorMessage);
+        
+        if (shouldReply) {
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: `❌ ${errorMessage}`,
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: `❌ ${errorMessage}`,
+                    ephemeral: true
+                });
+            }
+        }
+        
+        throw new Error(errorMessage);
     }
 
-    // إنشاء القنوات
-    const logChannel = await guild.channels.create({
-        name: 'سجل-الحضور',
-        type: 0,
-        permissionOverwrites: [
-            {
-                id: guild.id,
-                deny: ['ViewChannel']
-            },
-            {
-                id: selectedRole.id,
-                allow: ['ViewChannel'],
-                deny: ['SendMessages']
-            }
-        ]
-    });
+    try {
+        // إنشاء رتبة "مسجل حضوره"
+        let attendanceRole = guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        if (!attendanceRole) {
+            attendanceRole = await guild.roles.create({
+                name: 'مسجل حضوره',
+                color: 0x00FF00,
+                reason: 'رتبة تتبع الحضور'
+            });
+        }
 
-    const attendanceChannel = await guild.channels.create({
-        name: 'تسجيل-الحضور',
-        type: 0,
-        permissionOverwrites: [
-            {
-                id: guild.id,
-                deny: ['ViewChannel']
-            },
-            {
-                id: selectedRole.id,
-                allow: ['ViewChannel'],
-                deny: ['SendMessages']
-            }
-        ]
-    });
-
-    // إنشاء رسالة الحضور
-    const attendanceEmbed = new EmbedBuilder()
-        .setTitle('📋 نظام الحضور')
-        .setDescription('سجل حضورك وانصرافك باستخدام الأزرار أدناه')
-        .setColor(0x00FF00);
-
-    const attendanceButtons = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('check_in')
-                .setLabel('تسجيل حضور')
-                .setStyle(ButtonStyle.Success)
-                .setEmoji('✅'),
-            new ButtonBuilder()
-                .setCustomId('check_out')
-                .setLabel('تسجيل انصراف')
-                .setStyle(ButtonStyle.Danger)
-                .setEmoji('👋')
-        );
-
-    await attendanceChannel.send({
-        embeds: [attendanceEmbed],
-        components: [attendanceButtons]
-    });
-
-    if (shouldReply) {
-        await interaction.reply({
-            content: '✅ تم إعداد نظام الحضور بنجاح!',
-            ephemeral: true
+        // إنشاء القنوات
+        const logChannel = await guild.channels.create({
+            name: 'سجل-الحضور',
+            type: 0,
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: ['ViewChannel']
+                },
+                {
+                    id: selectedRole.id,
+                    allow: ['ViewChannel'],
+                    deny: ['SendMessages']
+                }
+            ]
         });
+
+        const attendanceChannel = await guild.channels.create({
+            name: 'تسجيل-الحضور',
+            type: 0,
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: ['ViewChannel']
+                },
+                {
+                    id: selectedRole.id,
+                    allow: ['ViewChannel'],
+                    deny: ['SendMessages']
+                }
+            ]
+        });
+
+        // إنشاء رسالة الحضور
+        const attendanceEmbed = new EmbedBuilder()
+            .setTitle('📋 نظام الحضور')
+            .setDescription('سجل حضورك وانصرافك باستخدام الأزرار أدناه')
+            .setColor(0x00FF00);
+
+        const attendanceButtons = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('check_in')
+                    .setLabel('تسجيل حضور')
+                    .setStyle(ButtonStyle.Success)
+                    .setEmoji('✅'),
+                new ButtonBuilder()
+                    .setCustomId('check_out')
+                    .setLabel('تسجيل انصراف')
+                    .setStyle(ButtonStyle.Danger)
+                    .setEmoji('👋')
+            );
+
+        await attendanceChannel.send({
+            embeds: [attendanceEmbed],
+            components: [attendanceButtons]
+        });
+
+        if (shouldReply) {
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: '✅ تم إعداد نظام الحضور بنجاح!',
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: '✅ تم إعداد نظام الحضور بنجاح!',
+                    ephemeral: true
+                });
+            }
+        }
+
+        // تحديث إعدادات السيرفر
+        await GuildSettings.updateSettings(guild.id, {
+            attendanceChannelId: attendanceChannel.id,
+            attendanceLogChannelId: logChannel.id,
+            attendanceRoleId: selectedRole.id,
+            attendanceTagRoleId: attendanceRole.id
+        }, { upsert: true });
+
+        return true;
+    } catch (error) {
+        console.error('Error in setupAttendance:', error);
+        
+        if (shouldReply) {
+            if (interaction.deferred) {
+                await interaction.editReply({
+                    content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
+                    ephemeral: true
+                });
+            } else {
+                await interaction.reply({
+                    content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
+                    ephemeral: true
+                });
+            }
+        }
+        
+        throw error;
     }
 }
