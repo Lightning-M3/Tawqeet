@@ -8,6 +8,7 @@ const {
     ChannelType
 } = require('discord.js');
 const ApplySettings = require('../models/ApplySettings');
+const GuildSettings = require('../models/GuildSettings');
 
 module.exports = {
     data: new SlashCommandBuilder()
@@ -378,9 +379,11 @@ async function setupWelcome(interaction, shouldReply = true) {
         });
 
         // تحديث إعدادات السيرفر
-        await GuildSettings.updateSettings(interaction.guild.id, {
-            welcomeChannelId: welcomeChannel.id
-        }, { upsert: true });
+        await GuildSettings.findOneAndUpdate(
+            { guildId: interaction.guild.id },
+            { welcomeChannelId: welcomeChannel.id },
+            { upsert: true, new: true }
+        );
 
         // الرد على المستخدم فقط إذا كان مطلوبًا وليس هناك رد مسبق
         if (shouldReply) {
@@ -457,11 +460,16 @@ async function setupApply(interaction, shouldReply = true, options = null) {
         });
 
         // تحديث الإعدادات في قاعدة البيانات
-        await GuildSettings.updateSettings(guild.id, {
-            applyChannelId: applyChannel.id,
-            applyLogsChannelId: logsChannel.id,
-            staffRoleId: staffRole.id
-        }, { upsert: true });
+        await GuildSettings.findOneAndUpdate(
+            { guildId: guild.id },
+            {
+                'features.apply.enabled': true,
+                'features.apply.channelId': applyChannel.id,
+                'features.apply.logChannelId': logsChannel.id,
+                'features.apply.staffRoleId': staffRole.id
+            },
+            { upsert: true, new: true }
+        );
 
         // إرسال زر التقديم
         const applyButton = new ActionRowBuilder().addComponents(
@@ -628,12 +636,18 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
         }
 
         // تحديث إعدادات السيرفر
-        await GuildSettings.updateSettings(guild.id, {
-            attendanceChannelId: attendanceChannel.id,
-            attendanceLogChannelId: logChannel.id,
-            attendanceRoleId: selectedRole.id,
-            attendanceTagRoleId: attendanceRole.id
-        }, { upsert: true });
+        await GuildSettings.findOneAndUpdate(
+            { guildId: guild.id },
+            {
+                'features.attendance.enabled': true,
+                'features.attendance.channelId': attendanceChannel.id,
+                'features.attendance.roleId': selectedRole.id,
+                attendanceChannelId: attendanceChannel.id,
+                attendanceLogChannelId: logChannel.id,
+                attendanceRoleId: selectedRole.id
+            },
+            { upsert: true, new: true }
+        );
 
         return true;
     } catch (error) {

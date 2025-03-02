@@ -68,6 +68,7 @@ const Leave = require('./models/Leave');
 const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
+const { setupGuild } = require('./utils/guildSetup'); // استيراد دالة إعداد السيرفر
 
 // ============= الدوال المساعدة الأساسية =============
 
