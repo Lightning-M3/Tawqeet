@@ -68,7 +68,7 @@ const Leave = require('./models/Leave');
 const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
-const { setupGuild } = require('./utils/guildSetup'); // استيراد دالة إعداد السيرفر
+const setupGuild = require('./utils/guildSetup');
 
 // ============= الدوال المساعدة الأساسية =============
 
@@ -806,6 +806,25 @@ async function handleCheckIn(interaction) {
 
     try {
         console.log('Starting check-in process for user:', userId);
+        
+        // التحقق من صلاحيات البوت قبل البدء بأي عملية
+        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        if (attendanceRole && !interaction.guild.members.me.permissions.has('ManageRoles')) {
+            logger.warn(`البوت لا يملك صلاحية إدارة الأدوار في سيرفر ${interaction.guild.name}`);
+            return await interaction.reply({
+                content: '❌ البوت لا يملك الصلاحيات الكافية لإضافة وإزالة رتبة "مسجل حضوره". الرجاء التواصل مع مسؤولي السيرفر لحل المشكلة.',
+                ephemeral: true
+            });
+        }
+        
+        // تحقق من إمكانية تعديل الرتبة
+        if (attendanceRole && !attendanceRole.editable) {
+            logger.warn(`البوت لا يمكنه تعديل رتبة ${attendanceRole.name} في سيرفر ${interaction.guild.name}`);
+            return await interaction.reply({
+                content: '❌ البوت لا يمكنه تعديل رتبة "مسجل حضوره" بسبب تسلسل الرتب. الرجاء التواصل مع مسؤولي السيرفر لحل المشكلة.',
+                ephemeral: true
+            });
+        }
 
         // تحقق من القفل
         if (attendanceLocks.get(userId)) {
@@ -867,8 +886,8 @@ async function handleCheckIn(interaction) {
             });
         }
 
-        // إضافة رتبة الحضور
-        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        // إضافة رتبة الحضور - استخدام الرتبة المعرفة مسبقاً
+        // تجنب إعادة تعريف المتغير لتفادي أخطاء TypeScript
         if (attendanceRole) {
             await interaction.member.roles.add(attendanceRole);
         }
@@ -876,18 +895,42 @@ async function handleCheckIn(interaction) {
         // تسجيل في قناة السجلات
         const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         if (logChannel) {
-            await logChannel.send({
-                embeds: [{
-                    title: '✅ تسجيل حضور',
-                    description: `${interaction.user} سجل حضوره`,
-                    fields: [{
-                        name: 'وقت الحضور',
-                        value: formatTimeInRiyadh(new Date())
-                    }],
-                    color: 0x00ff00,
-                    timestamp: new Date()
-                }]
-            });
+            try {
+                // التحقق من صلاحيات البوت قبل إرسال الرسالة
+                if (!logChannel.permissionsFor(interaction.guild.members.me).has('SendMessages')) {
+                    logger.warn('Missing SendMessages permission for attendance log channel', {
+                        guildId: interaction.guild.id,
+                        channelId: logChannel.id,
+                        userId: interaction.user.id,
+                        permissions: logChannel.permissionsFor(interaction.guild.members.me).serialize(),
+                        action: 'check-in'
+                    });
+                } else {
+                    await retryOperation(async () => {
+                        await logChannel.send({
+                            embeds: [{
+                                title: '✅ تسجيل حضور',
+                                description: `${interaction.user} سجل حضوره`,
+                                fields: [{
+                                    name: 'وقت الحضور',
+                                    value: formatTimeInRiyadh(new Date())
+                                }],
+                                color: 0x00ff00,
+                                timestamp: new Date()
+                            }]
+                        });
+                    }, 3, 1000); // 3 retries with 1 second initial delay
+                }
+            } catch (error) {
+                logger.error('خطأ في إرسال رسالة تسجيل الحضور:', {
+                    error: error.message,
+                    code: error.code,
+                    stack: error.stack,
+                    userId: interaction.user.id,
+                    guildId: interaction.guild.id,
+                    channelId: logChannel?.id
+                });
+            }
         }
 
         // إضافة نقاط الحضور
@@ -951,6 +994,25 @@ function formatSessionDuration(checkIn, checkOut) {
 // تحديث دالة تسجيل الانصراف
 async function handleCheckOut(interaction) {
     try {
+        // التحقق من صلاحيات البوت قبل البدء بأي عملية
+        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        if (attendanceRole && !interaction.guild.members.me.permissions.has('ManageRoles')) {
+            logger.warn(`البوت لا يملك صلاحية إدارة الأدوار في سيرفر ${interaction.guild.name}`);
+            return await interaction.reply({
+                content: '❌ البوت لا يملك الصلاحيات الكافية لإضافة وإزالة رتبة "مسجل حضوره". الرجاء التواصل مع مسؤولي السيرفر لحل المشكلة.',
+                ephemeral: true
+            });
+        }
+        
+        // تحقق من إمكانية تعديل الرتبة
+        if (attendanceRole && !attendanceRole.editable) {
+            logger.warn(`البوت لا يمكنه تعديل رتبة ${attendanceRole.name} في سيرفر ${interaction.guild.name}`);
+            return await interaction.reply({
+                content: '❌ البوت لا يمكنه تعديل رتبة "مسجل حضوره" بسبب تسلسل الرتب. الرجاء التواصل مع مسؤولي السيرفر لحل المشكلة.',
+                ephemeral: true
+            });
+        }
+        
         // إرسال رد فوري للمستخدم
         await interaction.reply({
             content: '🔄 جاري تسجيل الانصراف...',
@@ -987,7 +1049,7 @@ async function handleCheckOut(interaction) {
             interaction.guild.id
         );
 
-        const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
+        // استخدام المتغير الموجود بدلاً من إعادة تعريفه
         if (attendanceRole) {
             await interaction.member.roles.remove(attendanceRole);
         }
@@ -995,34 +1057,58 @@ async function handleCheckOut(interaction) {
         // تسجيل في قناة السجلات
         const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         if (logChannel) {
-            const checkInTime = formatTimeInRiyadh(lastSession.checkIn);
-            const checkOutTime = formatTimeInRiyadh(lastSession.checkOut);
+            try {
+                // التحقق من صلاحيات البوت قبل إرسال الرسالة
+                if (!logChannel.permissionsFor(interaction.guild.members.me).has('SendMessages')) {
+                    logger.warn('Missing SendMessages permission for attendance log channel', {
+                        guildId: interaction.guild.id,
+                        channelId: logChannel.id,
+                        userId: interaction.user.id,
+                        permissions: logChannel.permissionsFor(interaction.guild.members.me).serialize(),
+                        action: 'check-out'
+                    });
+                } else {
+                    const checkInTime = formatTimeInRiyadh(lastSession.checkIn);
+                    const checkOutTime = formatTimeInRiyadh(lastSession.checkOut);
 
-            await logChannel.send({
-                embeds: [{
-                    title: '⏹️ تسجيل انصراف',
-                    description: `${interaction.user} سجل انصرافه`,
-                    fields: [
-                        {
-                            name: 'وقت الحضور',
-                            value: checkInTime,
-                            inline: true
-                        },
-                        {
-                            name: 'وقت الانصراف',
-                            value: checkOutTime,
-                            inline: true
-                        },
-                        {
-                            name: 'المدة',
-                            value: duration,
-                            inline: true
-                        }
-                    ],
-                    color: 0xff0000,
-                    timestamp: new Date()
-                }]
-            });
+                    await retryOperation(async () => {
+                        await logChannel.send({
+                            embeds: [{
+                                title: '⏹️ تسجيل انصراف',
+                                description: `${interaction.user} سجل انصرافه`,
+                                fields: [
+                                    {
+                                        name: 'وقت الحضور',
+                                        value: checkInTime,
+                                        inline: true
+                                    },
+                                    {
+                                        name: 'وقت الانصراف',
+                                        value: checkOutTime,
+                                        inline: true
+                                    },
+                                    {
+                                        name: 'المدة',
+                                        value: duration,
+                                        inline: true
+                                    }
+                                ],
+                                color: 0xff0000,
+                                timestamp: new Date()
+                            }]
+                        });
+                    }, 3, 1000);
+                }
+            } catch (error) {
+                logger.error('خطأ في إرسال رسالة تسجيل الانصراف:', {
+                    error: error.message,
+                    code: error.code,
+                    stack: error.stack,
+                    userId: interaction.user.id,
+                    guildId: interaction.guild.id,
+                    channelId: logChannel?.id
+                });
+            }
         }
 
         await interaction.followUp({

@@ -352,6 +352,11 @@ async function setupTickets(interaction, shouldReply = true) {
 }
 
 async function setupWelcome(interaction, shouldReply = true) {
+    // تأجيل الرد في بداية الدالة إذا لم يكن مؤجلاً بالفعل
+    if (shouldReply && !interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ ephemeral: true });
+    }
+    
     const guild = interaction.guild;
     
     try {
@@ -385,19 +390,13 @@ async function setupWelcome(interaction, shouldReply = true) {
             { upsert: true, new: true }
         );
 
-        // الرد على المستخدم فقط إذا كان مطلوبًا وليس هناك رد مسبق
+        // الرد على المستخدم فقط إذا كان مطلوبًا
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: '✅ تم إعداد نظام الترحيب بنجاح!',
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: '✅ تم إعداد نظام الترحيب بنجاح!',
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: '✅ تم إعداد نظام الترحيب بنجاح!',
+                ephemeral: true
+            });
         }
 
         return true;
@@ -405,17 +404,11 @@ async function setupWelcome(interaction, shouldReply = true) {
         console.error('Error in setupWelcome:', error);
         
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: `❌ حدث خطأ أثناء إعداد نظام الترحيب: ${error.message}`,
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: `❌ حدث خطأ أثناء إعداد نظام الترحيب: ${error.message}`,
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: `❌ حدث خطأ أثناء إعداد نظام الترحيب: ${error.message}`,
+                ephemeral: true
+            });
         }
         
         throw error;
@@ -423,6 +416,11 @@ async function setupWelcome(interaction, shouldReply = true) {
 }
 
 async function setupApply(interaction, shouldReply = true, options = null) {
+    // تأجيل الرد في بداية الدالة إذا لم يكن مؤجلاً بالفعل
+    if (shouldReply && !interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ ephemeral: true });
+    }
+    
     try {
         const guild = interaction.guild;
         const applyChannel = options?.applyChannel || interaction.options.getChannel('apply_channel');
@@ -463,10 +461,9 @@ async function setupApply(interaction, shouldReply = true, options = null) {
         await GuildSettings.findOneAndUpdate(
             { guildId: guild.id },
             {
-                'features.apply.enabled': true,
-                'features.apply.channelId': applyChannel.id,
-                'features.apply.logChannelId': logsChannel.id,
-                'features.apply.staffRoleId': staffRole.id
+                applyChannelId: applyChannel.id,
+                applyLogsChannelId: logsChannel.id,
+                staffRoleId: staffRole.id
             },
             { upsert: true, new: true }
         );
@@ -491,19 +488,13 @@ async function setupApply(interaction, shouldReply = true, options = null) {
             components: [applyButton]
         });
 
-        // الرد على المستخدم فقط إذا كان مطلوبًا وليس هناك رد مسبق
+        // الرد على المستخدم فقط إذا كان مطلوبًا
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: '✅ تم إعداد نظام التقديم بنجاح!',
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: '✅ تم إعداد نظام التقديم بنجاح!',
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: '✅ تم إعداد نظام التقديم بنجاح!',
+                ephemeral: true
+            });
         }
 
         return true;
@@ -511,17 +502,11 @@ async function setupApply(interaction, shouldReply = true, options = null) {
         console.error('Error in setupApply:', error);
         
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: `❌ حدث خطأ أثناء إعداد نظام التقديم: ${error.message}`,
+                ephemeral: true
+            });
         }
         
         throw error;
@@ -529,6 +514,11 @@ async function setupApply(interaction, shouldReply = true, options = null) {
 }
 
 async function setupAttendance(interaction, shouldReply = true, options = null) {
+    // تأجيل الرد في بداية الدالة إذا لم يكن مؤجلاً بالفعل
+    if (shouldReply && !interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ ephemeral: true });
+    }
+    
     const guild = interaction.guild;
     const selectedRole = options?.role || interaction.options.getRole('role');
     if (!selectedRole) {
@@ -536,17 +526,11 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
         console.error(errorMessage);
         
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: `❌ ${errorMessage}`,
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: `❌ ${errorMessage}`,
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: `❌ ${errorMessage}`,
+                ephemeral: true
+            });
         }
         
         throw new Error(errorMessage);
@@ -622,29 +606,21 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
         });
 
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: '✅ تم إعداد نظام الحضور بنجاح!',
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: '✅ تم إعداد نظام الحضور بنجاح!',
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: '✅ تم إعداد نظام الحضور بنجاح!',
+                ephemeral: true
+            });
         }
 
         // تحديث إعدادات السيرفر
         await GuildSettings.findOneAndUpdate(
             { guildId: guild.id },
             {
-                'features.attendance.enabled': true,
-                'features.attendance.channelId': attendanceChannel.id,
-                'features.attendance.roleId': selectedRole.id,
                 attendanceChannelId: attendanceChannel.id,
                 attendanceLogChannelId: logChannel.id,
-                attendanceRoleId: selectedRole.id
+                attendanceRoleId: selectedRole.id,
+                attendanceTagRoleId: attendanceRole.id
             },
             { upsert: true, new: true }
         );
@@ -654,17 +630,11 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
         console.error('Error in setupAttendance:', error);
         
         if (shouldReply) {
-            if (interaction.deferred) {
-                await interaction.editReply({
-                    content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
-                    ephemeral: true
-                });
-            } else {
-                await interaction.reply({
-                    content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
-                    ephemeral: true
-                });
-            }
+            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: `❌ حدث خطأ أثناء إعداد نظام الحضور: ${error.message}`,
+                ephemeral: true
+            });
         }
         
         throw error;
