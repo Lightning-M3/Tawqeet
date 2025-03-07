@@ -47,7 +47,7 @@ async function setupGuild(guild) {
         const attendanceRole = guild.roles.cache.find(r => r.name === 'مسجل حضوره') ||
             await guild.roles.create({
                 name: 'مسجل حضوره',
-                color: 'GREEN',
+                color: 0x00FF00, // استخدام قيمة هيكساديسيمال للون الأخضر
                 reason: 'رتبة تمييز الأعضاء المسجلين حضورهم'
             });
 

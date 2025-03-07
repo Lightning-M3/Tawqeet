@@ -1,7 +1,8 @@
 const cron = require('node-cron');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const logger = require('../utils/logger');
 const Attendance = require('../models/Attendance');
+const GuildSettings = require('../models/GuildSettings');
 const moment = require('moment-timezone');
 const { retryOperation } = require('../utils/helpers');
 
@@ -71,10 +72,33 @@ async function forceCheckOutAll(guild) {
         });
 
         // البحث عن قناة السجل مع التحقق من وجودها
-        const logChannel = guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        // Get log channel from GuildSettings
+const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+const logChannel = guildSettings?.attendanceLogChannelId
+  ? await guild.channels.fetch(guildSettings.attendanceLogChannelId).catch(() => null)
+  : guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         
         // التحقق من وجود قناة السجل
-        if (!logChannel) {
+        if (!logChannel?.permissionsFor(guild.members.me)?.has('SendMessages')) {
+  logger.warn('Missing SendMessages permission for attendance log channel', {
+    guildId: guild.id,
+    channelId: logChannel?.id
+  });
+  
+  // إرسال إشعار لمالك السيرفر عن نقص الصلاحيات
+  if (global.permissionNotifier) {
+    await global.permissionNotifier.handlePermissionError(
+      guild.id,
+      logChannel?.id,
+      'سجل-الحضور',
+      'SendMessages'
+    );
+  }
+  
+  return;
+}
+
+if (!logChannel) {
             logger.warn(`قناة سجل-الحضور غير موجودة في السيرفر ${guild.name} (${guild.id})`);
         }
         const now = new Date();
@@ -109,6 +133,16 @@ async function forceCheckOutAll(guild) {
                         // التحقق من صلاحيات البوت قبل إزالة الرتبة
                         if (!guild.members.me.permissions.has('ManageRoles')) {
                             logger.warn(`البوت لا يملك صلاحية إدارة الأدوار في سيرفر ${guild.name}`);
+                            
+                            // إرسال إشعار لمالك السيرفر عن نقص الصلاحيات
+                            if (global.permissionNotifier) {
+                                await global.permissionNotifier.handlePermissionError(
+                                    guild.id,
+                                    null,
+                                    'إدارة الأدوار',
+                                    'ManageRoles'
+                                );
+                            }
                         } else if (!attendanceRole.editable) {
                             logger.warn(`البوت لا يمكنه تعديل رتبة ${attendanceRole.name} في سيرفر ${guild.name}`);
                         } else {
@@ -131,8 +165,14 @@ async function forceCheckOutAll(guild) {
                     if (logChannel) {
                         try {
                             // التحقق من صلاحيات البوت قبل إرسال الرسالة
-                            if (!logChannel.permissionsFor(guild.members.me).has('SendMessages')) {
-                                logger.warn(`البوت لا يملك صلاحيات كافية للإرسال في قناة سجل-الحضور في سيرفر ${guild.name}`);
+                            if (!logChannel.permissionsFor(guild.members.me).has(['SendMessages', 'ViewChannel'])) {
+                                logger.warn('Missing SendMessages permission for attendance log channel', {
+                                    guildId: guild.id,
+                                    channelId: logChannel.id,
+                                    userId: member.id,
+                                    permissions: logChannel.permissionsFor(guild.members.me).serialize(),
+                                    action: 'check-out'
+                                });
                                 continue;
                             }
                             
@@ -176,6 +216,16 @@ async function forceCheckOutAll(guild) {
             // التحقق من صلاحيات البوت قبل إزالة الرتبة
             if (!guild.members.me.permissions.has('ManageRoles')) {
                 logger.warn(`البوت لا يملك صلاحية إدارة الأدوار في سيرفر ${guild.name}`);
+                
+                // إرسال إشعار لمالك السيرفر عن نقص الصلاحيات
+                if (global.permissionNotifier) {
+                    await global.permissionNotifier.handlePermissionError(
+                        guild.id,
+                        null,
+                        'إدارة الأدوار',
+                        'ManageRoles'
+                    );
+                }
             } else if (!attendanceRole.editable) {
                 logger.warn(`البوت لا يمكنه تعديل رتبة ${attendanceRole.name} في سيرفر ${guild.name}`);
             } else {
@@ -250,13 +300,37 @@ async function sendDailyReport(guild) {
     try {
         locks.dailyReport = true;
         // البحث عن قناة السجل مع التحقق من وجودها
-        const logChannel = guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        // Get log channel from GuildSettings
+const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+const logChannel = guildSettings?.attendanceLogChannelId
+  ? await guild.channels.fetch(guildSettings.attendanceLogChannelId).catch(() => null)
+  : guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         
         // التحقق من وجود قناة السجل
-        if (!logChannel) {
+        if (!logChannel?.permissionsFor(guild.members.me)?.has('SendMessages')) {
+  logger.warn('Missing SendMessages permission for attendance log channel', {
+    guildId: guild.id,
+    channelId: logChannel?.id
+  });
+  
+  // إرسال إشعار لمالك السيرفر عن نقص الصلاحيات
+  if (global.permissionNotifier) {
+    await global.permissionNotifier.handlePermissionError(
+      guild.id,
+      logChannel?.id,
+      'سجل-الحضور',
+      'SendMessages'
+    );
+  }
+  
+  return;
+}
+
+if (!logChannel) {
             logger.warn(`قناة سجل-الحضور غير موجودة في السيرفر ${guild.name} (${guild.id})`);
+            locks.dailyReport = false;
+            return;
         }
-        if (!logChannel) return;
         
         // التحقق من صلاحيات البوت قبل المتابعة
         if (!logChannel.permissionsFor(guild.members.me).has('SendMessages')) {
@@ -376,8 +450,12 @@ async function generateDailyStats(records, guild) {
 async function sendDailyReportEmbeds(stats, channel, date) {
     try {
         // التحقق من صلاحيات البوت قبل إرسال الرسالة
-        if (!channel.permissionsFor(channel.guild.members.me).has('SendMessages')) {
-            logger.warn(`البوت لا يملك صلاحيات كافية للإرسال في قناة سجل-الحضور في سيرفر ${channel.guild.name}`);
+        if (!channel?.permissionsFor(channel.guild.members.me)?.has(['SendMessages', 'ViewChannel'])) {
+            logger.warn(`البوت لا يملك صلاحيات كافية للإرسال في قناة سجل-الحضور في سيرفر ${channel.guild.name}`, {
+                guildId: channel.guild.id,
+                channelId: channel.id,
+                permissions: channel.permissionsFor(channel.guild.members.me)?.serialize()
+            });
             return;
         }
         

@@ -23,6 +23,15 @@ class TimeValidator {
         const now = new Date();
         return now.getHours() === 23 && now.getMinutes() === 59;
     }
+
+    static isRestrictedCheckInTime() {
+        const now = new Date();
+        const hours = now.getHours();
+        const minutes = now.getMinutes();
+        
+        // Check if time is between 11:57 PM and 11:59 PM
+        return hours === 23 && (minutes >= 57 && minutes <= 59);
+    }
 }
 
-module.exports = TimeValidator; 
+module.exports = TimeValidator;

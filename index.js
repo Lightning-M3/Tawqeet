@@ -23,6 +23,7 @@ const cron = require('node-cron');
 const NodeCache = require('node-cache');
 const moment = require('moment-timezone');
 require('dotenv').config();
+const TimeValidator = require('./utils/timeValidator');
 
 // ============= دوال مساعدة للتعامل مع التوقيت =============
 // تهيئة المنطقة الزمنية لمكة المكرمة
@@ -69,6 +70,7 @@ const PointsManager = require('./models/PointsManager');
 const StatisticsManager = require('./models/StatisticsManager');
 const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSettings
 const setupGuild = require('./utils/guildSetup');
+const PermissionNotifier = require('./utils/permissionNotifier'); // إضافة نظام إشعارات الصلاحيات
 
 // ============= الدوال المساعدة الأساسية =============
 
@@ -145,7 +147,7 @@ async function createTicketChannel(interaction, ticketType) {
         const parentChannel = interaction.channel.parent; // الحصول على الفئة من القناة التي تم استخدامها
         const channelOptions = {
             name: ticketName,
-            type: 0, // نوع القناة النصية
+            type: ChannelType.GuildText, // نوع القناة النصية
             permissionOverwrites: [
                 {
                     id: guild.id,
@@ -163,7 +165,11 @@ async function createTicketChannel(interaction, ticketType) {
         };
 
         // إنشاء القناة
-        const ticketChannel = await guild.channels.create(ticketName, channelOptions);
+        const ticketChannel = await guild.channels.create({
+            name: ticketName,
+            type: ChannelType.GuildText,
+            permissionOverwrites: channelOptions.permissionOverwrites
+        });
     
         // حفظ التذكرة في قاعدة البيانات
         const ticket = new Ticket({
@@ -191,7 +197,7 @@ async function createTicketChannel(interaction, ticketType) {
                     .setStyle(ButtonStyle.Danger)
             );
 
-        await channel.send({
+        await ticketChannel.send({
             embeds: [embed],
             components: [row]
         });
@@ -199,6 +205,7 @@ async function createTicketChannel(interaction, ticketType) {
         return ticketChannel;
     } catch (error) {
         logger.error('Error in OpenTicket:', error);
+        throw error; // Re-throw the error to be handled by the caller
     }
 }
 
@@ -323,6 +330,10 @@ client.once(Events.ClientReady, async () => {
             username: client.user.tag,
             guildsCount: client.guilds.cache.size
         });
+
+        // تهيئة نظام إشعارات الصلاحيات
+        global.permissionNotifier = new PermissionNotifier(client);
+        logger.info('Permission notifier system initialized');
 
         // تحديث حالة البوت
         await updateBotPresence(client);
@@ -806,6 +817,14 @@ async function handleCheckIn(interaction) {
 
     try {
         console.log('Starting check-in process for user:', userId);
+        
+        // التحقق من الوقت المقيد (11:57 PM - 11:59 PM)
+        if (TimeValidator.isRestrictedCheckInTime()) {
+            return await interaction.reply({
+                content: '⏰ لا يمكن تسجيل الحضور بين الساعة 11:57 مساءً و 11:59 مساءً. يرجى الانتظار حتى الساعة 12:00 صباحاً لتسجيل حضورك.',
+                ephemeral: true
+            });
+        }
         
         // التحقق من صلاحيات البوت قبل البدء بأي عملية
         const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
@@ -2062,17 +2081,35 @@ async function checkAttendanceAndLeave(userId, guildId) {
 client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit()) {
         if (interaction.customId === 'ticket_modal') {
-            const content = interaction.fields.getTextInputValue('ticket_content');
+            try {
+                const content = interaction.fields.getTextInputValue('ticket_content');
 
-            // إنشاء القناة للتذكرة
-            const ticketChannel = await createTicketChannel(interaction, content);
-            await interaction.reply({
-                content: `✅ تم إنشاء تذكرتك بنجاح في ${ticketChannel}`,
-                ephemeral: true
-            });
+                // إنشاء القناة للتذكرة
+                const ticketChannel = await createTicketChannel(interaction, content);
+                
+                await interaction.reply({
+                    content: `✅ تم إنشاء تذكرتك بنجاح في ${ticketChannel}`,
+                    ephemeral: true
+                });
 
-            // إرسال محتوى التذكرة إلى القناة مع منشن
-            await ticketChannel.send(`@everyone محتوى التذكرة: ${content}`);
+                // إرسال محتوى التذكرة إلى القناة مع منشن
+                await ticketChannel.send(`@everyone محتوى التذكرة: ${content}`);
+            } catch (error) {
+                logger.error('خطأ في إنشاء التذكرة:', error);
+                
+                // التحقق من حالة التفاعل قبل الرد
+                if (!interaction.replied && !interaction.deferred) {
+                    await interaction.reply({
+                        content: '❌ حدث خطأ أثناء إنشاء التذكرة. الرجاء المحاولة مرة أخرى لاحقاً.',
+                        ephemeral: true
+                    });
+                } else if (interaction.deferred && !interaction.replied) {
+                    await interaction.editReply({
+                        content: '❌ حدث خطأ أثناء إنشاء التذكرة. الرجاء المحاولة مرة أخرى لاحقاً.',
+                        ephemeral: true
+                    });
+                }
+            }
         }
     } else if (interaction.isButton() && interaction.customId) {
         if (interaction.customId.startsWith('close_ticket')) {

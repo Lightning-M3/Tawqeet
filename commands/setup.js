@@ -208,10 +208,19 @@ async function setupTickets(interaction, shouldReply = true) {
             PermissionFlagsBits.SendMessages
         ];
 
-        for (const permission of requiredPermissions) {
-            if (!botMember.permissions.has(permission)) {
-                throw new Error(`البوت يفتقد للصلاحيات المطلوبة`);
-            }
+        // تحقق من جميع الصلاحيات المطلوبة مرة واحدة
+        const missingPermissions = requiredPermissions.filter(permission => !botMember.permissions.has(permission));
+        
+        if (missingPermissions.length > 0) {
+            // تحويل أرقام الصلاحيات إلى أسماء
+            const permissionNames = missingPermissions.map(perm => {
+                for (const [key, value] of Object.entries(PermissionFlagsBits)) {
+                    if (value === perm) return key;
+                }
+                return 'Unknown';
+            });
+            
+            throw new Error(`البوت يفتقد للصلاحيات التالية: ${permissionNames.join(', ')}`);
         }
 
         if (shouldReply && !interaction.deferred) {
