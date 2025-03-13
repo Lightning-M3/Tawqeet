@@ -72,6 +72,102 @@ const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSett
 const setupGuild = require('./utils/guildSetup');
 const PermissionNotifier = require('./utils/permissionNotifier'); // إضافة نظام إشعارات الصلاحيات
 
+
+// ============= كود مؤقت لجمع معرفات القنوات =============
+// سيتم تنفيذ هذا الكود مرة واحدة عند بدء تشغيل البوت ثم يمكن حذفه
+const collectChannelIds = async (client) => {
+    try {
+        logger.info('بدء عملية جمع معرفات قنوات الحضور...');
+        
+        // مصفوفة لتخزين النتائج
+        const results = {
+            found: [],
+            notFound: [],
+            total: 0
+        };
+        
+        // المرور على جميع السيرفرات
+        for (const guild of client.guilds.cache.values()) {
+            try {
+                // تحميل قنوات السيرفر إذا لم تكن محملة
+                await guild.channels.fetch();
+                
+                // البحث عن القنوات المطلوبة
+                const logChannel = guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+                const registrationChannel = guild.channels.cache.find(c => c.name === 'تسجيل-الحضور');
+                
+                // التحقق من وجود القنوات في قاعدة البيانات
+                const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+                const dbLogChannelId = guildSettings?.attendanceLogChannelId;
+                const dbRegistrationChannelId = guildSettings?.attendanceChannelId;
+                
+                // جمع المعلومات
+                const channelInfo = {
+                    guildId: guild.id,
+                    guildName: guild.name,
+                    logChannel: logChannel ? { id: logChannel.id, name: logChannel.name } : null,
+                    registrationChannel: registrationChannel ? { id: registrationChannel.id, name: registrationChannel.name } : null,
+                    dbLogChannelId,
+                    dbRegistrationChannelId
+                };
+                
+                // تحديد ما إذا كان السيرفر يحتوي على القنوات المطلوبة
+                if (logChannel || registrationChannel || dbLogChannelId || dbRegistrationChannelId) {
+                    results.found.push(channelInfo);
+                } else {
+                    results.notFound.push({
+                        guildId: guild.id,
+                        guildName: guild.name
+                    });
+                }
+            } catch (guildError) {
+                logger.error(`خطأ في جمع معلومات السيرفر ${guild.name} (${guild.id}):`, {
+                    error: guildError.message,
+                    stack: guildError.stack
+                });
+            }
+        }
+        
+        // إحصائيات النتائج
+        results.total = client.guilds.cache.size;
+        results.foundCount = results.found.length;
+        results.notFoundCount = results.notFound.length;
+        
+        // تسجيل النتائج
+        logger.info('نتائج جمع معرفات قنوات الحضور:', {
+            total: results.total,
+            found: results.foundCount,
+            notFound: results.notFoundCount
+        });
+        
+        // تسجيل تفاصيل السيرفرات التي تحتوي على القنوات
+        logger.info('السيرفرات التي تحتوي على قنوات الحضور:', {
+            servers: results.found.map(g => ({
+                name: g.guildName,
+                id: g.guildId,
+                logChannel: g.logChannel?.id || g.dbLogChannelId || 'غير موجود',
+                registrationChannel: g.registrationChannel?.id || g.dbRegistrationChannelId || 'غير موجود'
+            }))
+        });
+        
+        // تسجيل السيرفرات التي لا تحتوي على القنوات
+        if (results.notFound.length > 0) {
+            logger.info('السيرفرات التي لا تحتوي على قنوات الحضور:', {
+                servers: results.notFound.map(g => ({ name: g.guildName, id: g.guildId }))
+            });
+        }
+        
+        return results;
+    } catch (error) {
+        logger.error('خطأ في عملية جمع معرفات قنوات الحضور:', {
+            error: error.message,
+            stack: error.stack
+        });
+        return { error: error.message };
+    }
+};
+
+
 // ============= الدوال المساعدة الأساسية =============
 
 // دالة لإعادة محاولة العمليات على قاعدة البيانات
@@ -335,6 +431,9 @@ client.once(Events.ClientReady, async () => {
         global.permissionNotifier = new PermissionNotifier(client);
         logger.info('Permission notifier system initialized');
 
+        // تنفيذ الكود المؤقت لجمع معرفات القنوات
+        await collectChannelIds(client);
+        
         // تحديث حالة البوت
         await updateBotPresence(client);
 
@@ -911,8 +1010,11 @@ async function handleCheckIn(interaction) {
             await interaction.member.roles.add(attendanceRole);
         }
 
-        // تسجيل في قناة السجلات
-        const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        // تسجيل في قناة السجلات - استخدام معرف القناة من إعدادات السيرفر
+        const guildSettings = await GuildSettings.findOne({ guildId: interaction.guild.id });
+        const logChannel = guildSettings?.attendanceLogChannelId
+            ? await interaction.guild.channels.fetch(guildSettings.attendanceLogChannelId).catch(() => null)
+            : interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         if (logChannel) {
             try {
                 // التحقق من صلاحيات البوت قبل إرسال الرسالة
@@ -1073,8 +1175,11 @@ async function handleCheckOut(interaction) {
             await interaction.member.roles.remove(attendanceRole);
         }
 
-        // تسجيل في قناة السجلات
-        const logChannel = interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        // تسجيل في قناة السجلات - استخدام معرف القناة من إعدادات السيرفر
+        const guildSettings = await GuildSettings.findOne({ guildId: interaction.guild.id });
+        const logChannel = guildSettings?.attendanceLogChannelId
+            ? await interaction.guild.channels.fetch(guildSettings.attendanceLogChannelId).catch(() => null)
+            : interaction.guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         if (logChannel) {
             try {
                 // التحقق من صلاحيات البوت قبل إرسال الرسالة
@@ -1913,7 +2018,11 @@ function splitIntoChunks(text, maxLength) {
 // تحديث دالة السجل اليومي
 async function generateDailyAttendanceLog(guild) {
     try {
-        const logChannel = guild.channels.cache.find(c => c.name === 'سجل-الحضور');
+        // استخدام معرف القناة من إعدادات السيرفر
+        const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
+        const logChannel = guildSettings?.attendanceLogChannelId
+            ? await guild.channels.fetch(guildSettings.attendanceLogChannelId).catch(() => null)
+            : guild.channels.cache.find(c => c.name === 'سجل-الحضور');
         if (!logChannel) return;
 
         const startOfDay = getStartOfDay();

@@ -17,28 +17,6 @@ module.exports = {
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addSubcommand(subcommand =>
             subcommand
-                .setName('all')
-                .setDescription('إعداد جميع الأنظمة دفعة واحدة')
-                .addRoleOption(option =>
-                    option.setName('attendance_role')
-                        .setDescription('رتبة الحضور')
-                        .setRequired(true))
-                .addChannelOption(option =>
-                    option.setName('apply_channel')
-                        .setDescription('قناة التقديم')
-                        .setRequired(true)
-                        .addChannelTypes(ChannelType.GuildText))
-                .addChannelOption(option =>
-                    option.setName('apply_logs')
-                        .setDescription('قناة سجلات التقديم')
-                        .setRequired(true)
-                        .addChannelTypes(ChannelType.GuildText))
-                .addRoleOption(option =>
-                    option.setName('staff_role')
-                        .setDescription('رتبة الإداريين المسؤولين عن مراجعة الطلبات')
-                        .setRequired(true)))
-        .addSubcommand(subcommand =>
-            subcommand
                 .setName('tickets')
                 .setDescription('إعداد نظام التذاكر'))
         .addSubcommand(subcommand =>
@@ -69,8 +47,18 @@ module.exports = {
                 .setDescription('إعداد نظام الحضور')
                 .addRoleOption(option =>
                     option.setName('role')
-                        .setDescription('رتبة الحضور')
-                        .setRequired(true))),
+                        .setDescription('رتبة الإدارة')
+                        .setRequired(true))
+                .addChannelOption(option =>
+                    option.setName('attendance_channel')
+                        .setDescription('قناة تسجيل الحضور')
+                        .setRequired(true)
+                        .addChannelTypes(ChannelType.GuildText))
+                .addChannelOption(option =>
+                    option.setName('log_channel')
+                        .setDescription('قناة سجل الحضور')
+                        .setRequired(true)
+                        .addChannelTypes(ChannelType.GuildText))),
 
     async execute(interaction) {
         if (!interaction.guild.members.me.permissions.has(['ManageChannels', 'ManageRoles'])) {
@@ -84,18 +72,12 @@ module.exports = {
 
         try {
             switch (subcommand) {
-                case 'all':
-                    await setupAll(interaction);
-                    break;
-                case 'tickets':
-                    await setupTickets(interaction);
-                    break;
-                case 'welcome':
-                    await setupWelcome(interaction);
-                    break;
-                case 'apply':
-                    await setupApply(interaction);
-                    break;
+                default:
+                    await interaction.reply({
+                        content: 'هذا النظام قيد التطوير',
+                        ephemeral: true
+                    });
+                    return;
                 case 'attendance':
                     await setupAttendance(interaction);
                     break;
@@ -530,12 +512,53 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
     
     const guild = interaction.guild;
     const selectedRole = options?.role || interaction.options.getRole('role');
-    if (!selectedRole) {
-        const errorMessage = 'الرتبة المطلوبة غير متوفرة لإعداد نظام الحضور';
+    
+    // الحصول على القنوات المحددة من قبل المسؤول
+    const attendanceChannel = options?.attendanceChannel || interaction.options.getChannel('attendance_channel');
+    const logChannel = options?.logChannel || interaction.options.getChannel('log_channel');
+    
+    // التحقق من وجود الرتبة والقنوات
+    if (!selectedRole || !attendanceChannel || !logChannel) {
+        const errorMessage = 'الرتبة أو القنوات المطلوبة غير متوفرة لإعداد نظام الحضور';
         console.error(errorMessage);
         
         if (shouldReply) {
-            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
+            await interaction.editReply({
+                content: `❌ ${errorMessage}`,
+                ephemeral: true
+            });
+        }
+        
+        throw new Error(errorMessage);
+    }
+    
+    // التحقق من أن القناتين مختلفتين
+    if (attendanceChannel.id === logChannel.id) {
+        const errorMessage = 'يجب أن تكون قناة الحضور وقناة السجل مختلفتين';
+        console.error(errorMessage);
+        
+        if (shouldReply) {
+            await interaction.editReply({
+                content: `❌ ${errorMessage}`,
+                ephemeral: true
+            });
+        }
+        
+        throw new Error(errorMessage);
+    }
+    
+    // التحقق من صلاحيات البوت في القنوات
+    const requiredPermissions = ['ViewChannel', 'SendMessages'];
+    const botMember = guild.members.me;
+    
+    const attendanceChannelPerms = attendanceChannel.permissionsFor(botMember);
+    const logChannelPerms = logChannel.permissionsFor(botMember);
+    
+    if (!attendanceChannelPerms.has(requiredPermissions) || !logChannelPerms.has(requiredPermissions)) {
+        const errorMessage = 'البوت لا يملك الصلاحيات الكافية في القنوات المحددة (مطلوب: عرض القناة وإرسال الرسائل)';
+        console.error(errorMessage);
+        
+        if (shouldReply) {
             await interaction.editReply({
                 content: `❌ ${errorMessage}`,
                 ephemeral: true
@@ -546,7 +569,7 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
     }
 
     try {
-        // إنشاء رتبة "مسجل حضوره"
+        // إنشاء رتبة "مسجل حضوره" إذا لم تكن موجودة
         let attendanceRole = guild.roles.cache.find(role => role.name === 'مسجل حضوره');
         if (!attendanceRole) {
             attendanceRole = await guild.roles.create({
@@ -555,39 +578,6 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
                 reason: 'رتبة تتبع الحضور'
             });
         }
-
-        // إنشاء القنوات
-        const logChannel = await guild.channels.create({
-            name: 'سجل-الحضور',
-            type: 0,
-            permissionOverwrites: [
-                {
-                    id: guild.id,
-                    deny: ['ViewChannel']
-                },
-                {
-                    id: selectedRole.id,
-                    allow: ['ViewChannel'],
-                    deny: ['SendMessages']
-                }
-            ]
-        });
-
-        const attendanceChannel = await guild.channels.create({
-            name: 'تسجيل-الحضور',
-            type: 0,
-            permissionOverwrites: [
-                {
-                    id: guild.id,
-                    deny: ['ViewChannel']
-                },
-                {
-                    id: selectedRole.id,
-                    allow: ['ViewChannel'],
-                    deny: ['SendMessages']
-                }
-            ]
-        });
 
         // إنشاء رسالة الحضور
         const attendanceEmbed = new EmbedBuilder()
@@ -609,13 +599,13 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
                     .setEmoji('👋')
             );
 
+        // إرسال رسالة الحضور إلى قناة الحضور
         await attendanceChannel.send({
             embeds: [attendanceEmbed],
             components: [attendanceButtons]
         });
 
         if (shouldReply) {
-            // استخدام editReply فقط لأن التفاعل مؤجل بالفعل
             await interaction.editReply({
                 content: '✅ تم إعداد نظام الحضور بنجاح!',
                 ephemeral: true
@@ -629,7 +619,10 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
                 attendanceChannelId: attendanceChannel.id,
                 attendanceLogChannelId: logChannel.id,
                 attendanceRoleId: selectedRole.id,
-                attendanceTagRoleId: attendanceRole.id
+                attendanceTagRoleId: attendanceRole.id,
+                'features.attendance.enabled': true,
+                'features.attendance.channelId': attendanceChannel.id,
+                'features.attendance.logChannelId': logChannel.id
             },
             { upsert: true, new: true }
         );

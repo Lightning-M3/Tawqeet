@@ -8,15 +8,15 @@ const guildSettingsSchema = new mongoose.Schema({
     },
     attendanceRoleId: {
         type: String,
-        required: true
+        default: null
     },
     welcomeChannelId: {
         type: String,
-        required: true
+        default: null
     },
     logsChannelId: {
         type: String,
-        required: true
+        default: null
     },
     setupComplete: {
         type: Boolean,
@@ -71,6 +71,10 @@ const guildSettingsSchema = new mongoose.Schema({
         default: null
     },
     attendanceChannelId: {
+        type: String,
+        default: null
+    },
+    attendanceLogChannelId: {
         type: String,
         default: null
     },

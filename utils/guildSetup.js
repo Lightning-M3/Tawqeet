@@ -14,48 +14,20 @@ async function setupGuild(guild) {
         
         // إنشاء إعدادات جديدة إذا لم تكن موجودة
         if (!guildConfig) {
-            guildConfig = new GuildSettings({ guildId: guild.id });
-        }
-
-        // التحقق من صلاحيات البوت
-        if (!guild.members.me.permissions.has(PermissionFlagsBits.ManageChannels | 
-            PermissionFlagsBits.ManageRoles | 
-            PermissionFlagsBits.ViewChannel | 
-            PermissionFlagsBits.SendMessages)) {
-            throw new Error('البوت لا يملك الصلاحيات الكافية لإعداد السيرفر');
-        }
-
-        // إنشاء قناة سجل-الحضور إذا لم تكن موجودة
-        const logChannel = guild.channels.cache.find(c => c.name === 'سجل-الحضور') ||
-            await guild.channels.create({
-                name: 'سجل-الحضور',
-                type: ChannelType.GuildText,
-                permissionOverwrites: [
-                    {
-                        id: guild.id,
-                        deny: [PermissionFlagsBits.SendMessages],
-                        allow: [PermissionFlagsBits.ViewChannel]
-                    },
-                    {
-                        id: guild.members.me.id,
-                        allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.ViewChannel]
-                    }
-                ]
+            guildConfig = new GuildSettings({ 
+                guildId: guild.id,
+                setupComplete: false // تعيين الإعداد كغير مكتمل حتى يقوم المستخدم بإعداده يدوياً
             });
+            
+            // حفظ الإعدادات الأساسية فقط دون إنشاء قنوات أو أدوار
+            await guildConfig.save();
+            logger.info(`تم إنشاء إعدادات أساسية للسيرفر ${guild.name} - يرجى استخدام أمر /setup لإكمال الإعداد`);
+            return;
+        }
+        
+        // إذا كانت الإعدادات موجودة بالفعل، نتحقق فقط من صحتها
+        logger.info(`تم التحقق من إعدادات السيرفر ${guild.name}`);
 
-        // إنشاء رتبة مسجل حضوره إذا لم تكن موجودة
-        const attendanceRole = guild.roles.cache.find(r => r.name === 'مسجل حضوره') ||
-            await guild.roles.create({
-                name: 'مسجل حضوره',
-                color: 0x00FF00, // استخدام قيمة هيكساديسيمال للون الأخضر
-                reason: 'رتبة تمييز الأعضاء المسجلين حضورهم'
-            });
-
-        // تحديث إعدادات السيرفر
-        guildConfig.logChannelId = logChannel.id;
-        guildConfig.attendanceRoleId = attendanceRole.id;
-        guildConfig.setupComplete = true;
-        await guildConfig.save();
 
         logger.info(`تم إعداد السيرفر ${guild.name} بنجاح`);
 

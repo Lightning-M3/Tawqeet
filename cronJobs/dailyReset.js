@@ -90,7 +90,7 @@ const logChannel = guildSettings?.attendanceLogChannelId
     await global.permissionNotifier.handlePermissionError(
       guild.id,
       logChannel?.id,
-      'سجل-الحضور',
+      'قناة سجلات الحضور',
       'SendMessages'
     );
   }
@@ -99,7 +99,7 @@ const logChannel = guildSettings?.attendanceLogChannelId
 }
 
 if (!logChannel) {
-            logger.warn(`قناة سجل-الحضور غير موجودة في السيرفر ${guild.name} (${guild.id})`);
+            logger.warn(`قناة سجلات الحضور غير موجودة في السيرفر ${guild.name} (${guild.id})`);
         }
         const now = new Date();
         const processedUsers = new Set();
@@ -318,7 +318,7 @@ const logChannel = guildSettings?.attendanceLogChannelId
     await global.permissionNotifier.handlePermissionError(
       guild.id,
       logChannel?.id,
-      'سجل-الحضور',
+      'قناة سجلات الحضور',
       'SendMessages'
     );
   }

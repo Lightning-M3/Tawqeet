@@ -1,6 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const Attendance = require('../models/Attendance'); // تأكد من مسار النموذج
-const logger = require('../utils/logger'); // تأكد من مسار السجل
+const logger = require('../utils/logger');
 const moment = require('moment-timezone');
 
 // خريطة لتخزين أوقات التبريد
@@ -33,7 +32,16 @@ module.exports = {
             await interaction.deferReply();
 
             const showDetails = interaction.options.getBoolean('details') ?? false;
-            const guildId = interaction.guild.id;
+            
+            // Add null check for interaction.guild
+            if (!interaction.guild) {
+                return await interaction.followUp({
+                    content: '❌ هذا الأمر يمكن استخدامه فقط داخل السيرفر',
+                    ephemeral: true
+                });
+            }
+            
+            // البحث عن رتبة الحضور
             const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
 
             if (!attendanceRole) {
@@ -43,52 +51,34 @@ module.exports = {
                 });
             }
 
-            // البحث عن جميع سجلات الحضور المفتوحة
-            const startOfDay = moment().tz('Asia/Riyadh').startOf('day').toDate();
-            const attendanceRecords = await Attendance.find({
-                guildId: guildId,
-                date: { $gte: startOfDay }
-            });
-
-            // تصفية السجلات التي تحتوي على جلسات مفتوحة
-            const recordsWithOpenSessions = attendanceRecords.filter(record => {
-                return record.sessions.some(session => !session.checkOut);
-            });
-
-            if (!recordsWithOpenSessions || recordsWithOpenSessions.length === 0) {
+            // الحصول على جميع الأعضاء الذين لديهم رتبة الحضور
+            const membersWithRole = attendanceRole.members;
+            
+            if (!membersWithRole || membersWithRole.size === 0) {
                 return await interaction.followUp({
                     content: '✅ لا توجد جلسات حضور مفتوحة حالياً',
                     ephemeral: true
                 });
             }
 
-            // تجميع معلومات الجلسات المفتوحة
+            // تجميع معلومات الأعضاء
             const openSessions = [];
-            let totalOpenSessions = 0;
+            const totalOpenSessions = membersWithRole.size;
 
-            for (const record of recordsWithOpenSessions) {
-                const member = await interaction.guild.members.fetch(record.userId).catch(() => null);
-                if (!member) {
-                    logger.warn(`لم يتم العثور على العضو ${record.userId} في السيرفر`);
-                    continue;
-                }
+            // تقدير وقت تسجيل الحضور (نفترض أنه منذ آخر تغيير للرتبة أو منذ ساعة إذا لم تتوفر المعلومات)
+            for (const [memberId, member] of membersWithRole) {
+                // نحصل على وقت إضافة الرتبة إذا كان متاحاً، وإلا نستخدم الوقت الحالي ناقص ساعة واحدة
+                const checkInTime = member.roles.cache.get(attendanceRole.id)?.joinedTimestamp || 
+                                   (Date.now() - 3600000); // افتراضي: منذ ساعة واحدة
                 
-                // التحقق من وجود رتبة الحضور (اختياري)
-                if (attendanceRole && !member.roles.cache.has(attendanceRole.id)) {
-                    logger.info(`العضو ${member.user.username} ليس لديه رتبة الحضور رغم وجود جلسة مفتوحة`);
-                }
-
-                const openSessionsForUser = record.sessions.filter(session => !session.checkOut);
-                if (openSessionsForUser.length === 0) continue;
-
-                totalOpenSessions += openSessionsForUser.length;
+                const duration = moment.duration(moment().diff(moment(checkInTime))).asMinutes();
                 
                 openSessions.push({
                     member,
-                    sessions: openSessionsForUser.map(session => ({
-                        checkIn: session.checkIn,
-                        duration: moment.duration(moment().diff(moment(session.checkIn))).asMinutes()
-                    }))
+                    sessions: [{
+                        checkIn: new Date(checkInTime),
+                        duration: duration
+                    }]
                 });
             }
 
@@ -117,8 +107,8 @@ module.exports = {
                 });
             } else {
                 // عرض ملخص فقط
-                const summary = openSessions.map(({ member, sessions }) => 
-                    `👤 ${member.user.username} - ${sessions.length} ${sessions.length === 1 ? 'جلسة' : 'جلسات'}`
+                const summary = openSessions.map(({ member }) => 
+                    `👤 ${member.user.username} - جلسة`
                 ).join('\n');
 
                 embed.addFields({
@@ -173,4 +163,4 @@ function checkCooldown(userId) {
     
     cooldowns.set(key, now + COOLDOWN_DURATION);
     return 0;
-} 
+}
