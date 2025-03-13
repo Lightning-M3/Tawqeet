@@ -40,8 +40,8 @@
 
 1. استنساخ المستودع:
 ```bash
-git clone <رابط-المستودع>
-cd discord-bot
+git clone https://github.com/Lightning-M3/Tawqeet
+cd Tawqeet
 ```
 
 2. تثبيت الاعتماديات:
