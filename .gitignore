@@ -4,6 +4,7 @@
 *.env
 !.env.example
 config.json
+package-lock.json
 
 # ملفات السجلات
 logs/

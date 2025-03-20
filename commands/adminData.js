@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const Attendance = require('../models/Attendance');
-const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
 const moment = require('moment-timezone');
 const logger = require('../utils/logger');
 const { retryOperation } = require('../utils/helpers');
@@ -96,7 +96,7 @@ module.exports = {
                     { name: 'ملف Excel', value: 'excel' }
                 )
         )
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+        .setDefaultMemberPermissions(PermissionFlagsBits.UseApplicationCommands),
 
     async execute(interaction) {
         try {
@@ -246,46 +246,60 @@ function calculateStats(records, days) {
  * @returns {Buffer} ملف Excel كـ buffer
  */
 async function generateExcelReport(stats, user, days) {
-    const workbook = XLSX.utils.book_new();
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Tawqeet Discord Bot';
+    workbook.lastModifiedBy = 'Tawqeet Discord Bot';
+    workbook.created = new Date();
+    workbook.modified = new Date();
     
     // صفحة الملخص
-    const summaryData = [
-        ['تقرير الحضور', user.username],
-        ['الفترة', `آخر ${days} يوم`],
-        [''],
-        ['إحصائيات الوقت'],
-        ['إجمالي وقت العمل', `${Math.floor(stats.totalMinutes / 60)}:${(stats.totalMinutes % 60).toString().padStart(2, '0')}`],
-        ['متوسط الوقت اليومي', `${Math.floor(stats.averageDaily / 60)}:${Math.floor(stats.averageDaily % 60).toString().padStart(2, '0')}`],
-        ['وقت العمل (آخر 7 أيام)', `${Math.floor(stats.lastWeekMinutes / 60)}:${(stats.lastWeekMinutes % 60).toString().padStart(2, '0')}`],
-        [''],
-        ['إحصائيات الحضور'],
-        ['أيام الحضور', stats.daysAttended],
-        ['عدد الجلسات', stats.totalSessions],
-        ['نسبة الحضور', `${Math.round(stats.attendancePercentage)}%`]
-    ];
-
-    const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
-    XLSX.utils.book_append_sheet(workbook, summarySheet, 'ملخص');
-
+    const summarySheet = workbook.addWorksheet('ملخص');
+    
+    // إضافة البيانات إلى صفحة الملخص
+    summarySheet.addRow(['تقرير الحضور', user.username]);
+    summarySheet.addRow(['الفترة', `آخر ${days} يوم`]);
+    summarySheet.addRow(['']);
+    summarySheet.addRow(['إحصائيات الوقت']);
+    summarySheet.addRow(['إجمالي وقت العمل', `${Math.floor(stats.totalMinutes / 60)}:${(stats.totalMinutes % 60).toString().padStart(2, '0')}`]);
+    summarySheet.addRow(['متوسط الوقت اليومي', `${Math.floor(stats.averageDaily / 60)}:${Math.floor(stats.averageDaily % 60).toString().padStart(2, '0')}`]);
+    summarySheet.addRow(['وقت العمل (آخر 7 أيام)', `${Math.floor(stats.lastWeekMinutes / 60)}:${(stats.lastWeekMinutes % 60).toString().padStart(2, '0')}`]);
+    summarySheet.addRow(['']);
+    summarySheet.addRow(['إحصائيات الحضور']);
+    summarySheet.addRow(['أيام الحضور', stats.daysAttended]);
+    summarySheet.addRow(['عدد الجلسات', stats.totalSessions]);
+    summarySheet.addRow(['نسبة الحضور', `${Math.round(stats.attendancePercentage)}%`]);
+    
+    // تنسيق صفحة الملخص
+    summarySheet.getColumn(1).width = 20;
+    summarySheet.getColumn(2).width = 25;
+    
     // صفحة التفاصيل اليومية
-    const detailsData = [
-        ['التاريخ', 'عدد الساعات', 'عدد الدقائق', 'عدد الجلسات']
-    ];
-
+    const detailsSheet = workbook.addWorksheet('التفاصيل اليومية');
+    
+    // إضافة رأس الجدول
+    detailsSheet.addRow(['التاريخ', 'عدد الساعات', 'عدد الدقائق', 'عدد الجلسات']);
+    
+    // تنسيق رأس الجدول
+    detailsSheet.getRow(1).font = { bold: true };
+    
+    // إضافة البيانات التفصيلية
     stats.dailyDetails.forEach(day => {
-        detailsData.push([
+        detailsSheet.addRow([
             day.date,
             Math.floor(day.minutes / 60),
             day.minutes % 60,
             day.sessions
         ]);
     });
-
-    const detailsSheet = XLSX.utils.aoa_to_sheet(detailsData);
-    XLSX.utils.book_append_sheet(workbook, detailsSheet, 'التفاصيل اليومية');
-
+    
+    // تنسيق صفحة التفاصيل
+    detailsSheet.getColumn(1).width = 15;
+    detailsSheet.getColumn(2).width = 15;
+    detailsSheet.getColumn(3).width = 15;
+    detailsSheet.getColumn(4).width = 15;
+    
     // تحويل الملف إلى buffer
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await workbook.xlsx.writeBuffer();
     return buffer;
 }
 

@@ -35,10 +35,20 @@ class Logger {
             ]
         });
 
-        // إضافة Console في بيئة التطوير
+        // إضافة Console في بيئة التطوير مع فلتر للرسائل
         if (process.env.NODE_ENV !== 'production') {
+            // إنشاء فلتر لمنع رسائل تحديث حالة البوت من الظهور في الكونسول
+            const consoleFilter = winston.format((info) => {
+                // التحقق مما إذا كانت الرسالة تتعلق بتحديث حالة البوت
+                if (info.message && info.message.includes('تم تحديث حالة البوت')) {
+                    return false; // لا تظهر في الكونسول
+                }
+                return info; // إظهار باقي الرسائل
+            });
+            
             this.logger.add(new winston.transports.Console({
                 format: winston.format.combine(
+                    consoleFilter(),
                     winston.format.colorize(),
                     winston.format.simple()
                 )
@@ -130,4 +140,4 @@ class Logger {
     }
 }
 
-module.exports = new Logger(); 
+module.exports = new Logger();

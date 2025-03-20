@@ -16,7 +16,7 @@ module.exports = {
                 .setDescription('عرض تفاصيل إضافية عن كل جلسة')
                 .setRequired(false)
         )
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+        .setDefaultMemberPermissions(PermissionFlagsBits.UseApplicationCommands),
 
     async execute(interaction) {
         try {

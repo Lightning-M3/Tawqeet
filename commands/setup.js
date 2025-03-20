@@ -14,7 +14,7 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('setup')
         .setDescription('إعداد أنظمة السيرفر المختلفة')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDefaultMemberPermissions(PermissionFlagsBits.UseApplicationCommands)
         .addSubcommand(subcommand =>
             subcommand
                 .setName('tickets')
@@ -61,6 +61,22 @@ module.exports = {
                         .addChannelTypes(ChannelType.GuildText))),
 
     async execute(interaction) {
+        // التحقق من وجود السيرفر قبل محاولة الوصول إلى الأعضاء
+        if (!interaction.guild) {
+            return interaction.reply({
+                content: 'هذا الأمر يمكن استخدامه فقط في السيرفرات!',
+                ephemeral: true
+            });
+        }
+
+        // التحقق من وجود كائن members.me قبل محاولة الوصول إلى الصلاحيات
+        if (!interaction.guild.members?.me) {
+            return interaction.reply({
+                content: 'حدث خطأ في الوصول إلى معلومات البوت في السيرفر. الرجاء المحاولة مرة أخرى.',
+                ephemeral: true
+            });
+        }
+
         if (!interaction.guild.members.me.permissions.has(['ManageChannels', 'ManageRoles'])) {
             return interaction.reply({
                 content: 'البوت يحتاج إلى صلاحيات إدارة القنوات والأدوار!',
@@ -182,8 +198,17 @@ async function setupAll(interaction) {
 
 async function setupTickets(interaction, shouldReply = true) {
     try {
+        // التحقق من وجود السيرفر
+        if (!interaction.guild) {
+            throw new Error('هذا الأمر يمكن استخدامه فقط في السيرفرات!');
+        }
+        
         // التحقق من صلاحيات البوت
-        const botMember = interaction.guild.members.me;
+        const botMember = interaction.guild.members?.me;
+        if (!botMember) {
+            throw new Error('لا يمكن الوصول إلى معلومات البوت في السيرفر');
+        }
+        
         const requiredPermissions = [
             PermissionFlagsBits.ManageChannels,
             PermissionFlagsBits.ViewChannel,
@@ -508,6 +533,21 @@ async function setupAttendance(interaction, shouldReply = true, options = null) 
     // تأجيل الرد في بداية الدالة إذا لم يكن مؤجلاً بالفعل
     if (shouldReply && !interaction.deferred && !interaction.replied) {
         await interaction.deferReply({ ephemeral: true });
+    }
+    
+    // التحقق من وجود السيرفر
+    if (!interaction.guild) {
+        const errorMessage = 'هذا الأمر يمكن استخدامه فقط في السيرفرات!';
+        console.error(errorMessage);
+        
+        if (shouldReply) {
+            await interaction.editReply({
+                content: `❌ ${errorMessage}`,
+                ephemeral: true
+            });
+        }
+        
+        throw new Error(errorMessage);
     }
     
     const guild = interaction.guild;

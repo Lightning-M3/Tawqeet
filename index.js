@@ -16,6 +16,7 @@ const {
     TextInputStyle,
     ChannelType
 } = require('discord.js');
+const { retryDiscordOperation, safeReply, processDiscordError } = require('./utils/discordErrorHandler');
 const fs = require('node:fs');
 const path = require('node:path');
 const mongoose = require('mongoose');
@@ -72,102 +73,6 @@ const GuildSettings = require('./models/GuildSettings'); // إضافة GuildSett
 const setupGuild = require('./utils/guildSetup');
 const PermissionNotifier = require('./utils/permissionNotifier'); // إضافة نظام إشعارات الصلاحيات
 
-
-// ============= كود مؤقت لجمع معرفات القنوات =============
-// سيتم تنفيذ هذا الكود مرة واحدة عند بدء تشغيل البوت ثم يمكن حذفه
-const collectChannelIds = async (client) => {
-    try {
-        logger.info('بدء عملية جمع معرفات قنوات الحضور...');
-        
-        // مصفوفة لتخزين النتائج
-        const results = {
-            found: [],
-            notFound: [],
-            total: 0
-        };
-        
-        // المرور على جميع السيرفرات
-        for (const guild of client.guilds.cache.values()) {
-            try {
-                // تحميل قنوات السيرفر إذا لم تكن محملة
-                await guild.channels.fetch();
-                
-                // البحث عن القنوات المطلوبة
-                const logChannel = guild.channels.cache.find(c => c.name === 'سجل-الحضور');
-                const registrationChannel = guild.channels.cache.find(c => c.name === 'تسجيل-الحضور');
-                
-                // التحقق من وجود القنوات في قاعدة البيانات
-                const guildSettings = await GuildSettings.findOne({ guildId: guild.id });
-                const dbLogChannelId = guildSettings?.attendanceLogChannelId;
-                const dbRegistrationChannelId = guildSettings?.attendanceChannelId;
-                
-                // جمع المعلومات
-                const channelInfo = {
-                    guildId: guild.id,
-                    guildName: guild.name,
-                    logChannel: logChannel ? { id: logChannel.id, name: logChannel.name } : null,
-                    registrationChannel: registrationChannel ? { id: registrationChannel.id, name: registrationChannel.name } : null,
-                    dbLogChannelId,
-                    dbRegistrationChannelId
-                };
-                
-                // تحديد ما إذا كان السيرفر يحتوي على القنوات المطلوبة
-                if (logChannel || registrationChannel || dbLogChannelId || dbRegistrationChannelId) {
-                    results.found.push(channelInfo);
-                } else {
-                    results.notFound.push({
-                        guildId: guild.id,
-                        guildName: guild.name
-                    });
-                }
-            } catch (guildError) {
-                logger.error(`خطأ في جمع معلومات السيرفر ${guild.name} (${guild.id}):`, {
-                    error: guildError.message,
-                    stack: guildError.stack
-                });
-            }
-        }
-        
-        // إحصائيات النتائج
-        results.total = client.guilds.cache.size;
-        results.foundCount = results.found.length;
-        results.notFoundCount = results.notFound.length;
-        
-        // تسجيل النتائج
-        logger.info('نتائج جمع معرفات قنوات الحضور:', {
-            total: results.total,
-            found: results.foundCount,
-            notFound: results.notFoundCount
-        });
-        
-        // تسجيل تفاصيل السيرفرات التي تحتوي على القنوات
-        logger.info('السيرفرات التي تحتوي على قنوات الحضور:', {
-            servers: results.found.map(g => ({
-                name: g.guildName,
-                id: g.guildId,
-                logChannel: g.logChannel?.id || g.dbLogChannelId || 'غير موجود',
-                registrationChannel: g.registrationChannel?.id || g.dbRegistrationChannelId || 'غير موجود'
-            }))
-        });
-        
-        // تسجيل السيرفرات التي لا تحتوي على القنوات
-        if (results.notFound.length > 0) {
-            logger.info('السيرفرات التي لا تحتوي على قنوات الحضور:', {
-                servers: results.notFound.map(g => ({ name: g.guildName, id: g.guildId }))
-            });
-        }
-        
-        return results;
-    } catch (error) {
-        logger.error('خطأ في عملية جمع معرفات قنوات الحضور:', {
-            error: error.message,
-            stack: error.stack
-        });
-        return { error: error.message };
-    }
-};
-
-
 // ============= الدوال المساعدة الأساسية =============
 
 // دالة لإعادة محاولة العمليات على قاعدة البيانات
@@ -195,10 +100,21 @@ async function retryOperation(operation, maxRetries = 3) {
 
 async function handleCreateTicket(interaction) {
     try {
+        // التحقق من صلاحية التفاعل قبل أي عملية
+        if (!interaction.isRepliable()) {
+            logger.warn('محاولة معالجة تفاعل غير صالح:', {
+                interactionId: interaction.id,
+                userId: interaction.user?.id,
+                guildId: interaction.guild?.id,
+                customId: interaction.customId
+            });
+            return;
+        }
+        
         // التحقق من حدود التذاكر
         const limits = await checkTicketLimits(interaction.user.id, interaction.guild.id);
         if (!limits.allowed) {
-            return await interaction.reply({
+            return await safeReply(interaction, interaction.reply, {
                 content: `❌ ${limits.reason}`,
                 ephemeral: true
             });
@@ -219,9 +135,30 @@ async function handleCreateTicket(interaction) {
         modal.addComponents(actionRow);
 
         // عرض الـ Modal للمستخدم
-        await interaction.showModal(modal);
+        try {
+            await interaction.showModal(modal);
+        } catch (modalError) {
+            // التحقق من نوع الخطأ
+            const errorInfo = processDiscordError(modalError);
+            logger.error('خطأ في عرض نموذج التذكرة:', {
+                error: modalError.message,
+                code: modalError.code,
+                isUnknownInteraction: errorInfo.isInteractionError
+            });
+            // لا نحاول الرد إذا كان الخطأ متعلق بالتفاعل
+            if (!errorInfo.isInteractionError) {
+                await safeReply(interaction, interaction.reply, {
+                    content: errorInfo.userMessage,
+                    ephemeral: true
+                });
+            }
+        }
     } catch (error) {
-        console.error('خطأ في إنشاء التذكرة:', error);
+        logger.error('خطأ في إنشاء التذكرة:', {
+            error: error.message,
+            code: error.code,
+            stack: error.stack
+        });
         await handleInteractionError(interaction, error); // استخدام دالة معالجة الأخطاء
     }
 }
@@ -430,9 +367,6 @@ client.once(Events.ClientReady, async () => {
         // تهيئة نظام إشعارات الصلاحيات
         global.permissionNotifier = new PermissionNotifier(client);
         logger.info('Permission notifier system initialized');
-
-        // تنفيذ الكود المؤقت لجمع معرفات القنوات
-        await collectChannelIds(client);
         
         // تحديث حالة البوت
         await updateBotPresence(client);
@@ -541,26 +475,29 @@ client.on('interactionCreate', async (interaction) => {
             }
         }
     } catch (error) {
+        // معالجة الخطأ باستخدام وحدة معالجة أخطاء Discord API
+        const errorInfo = processDiscordError(error);
+        
         logger.error('خطأ في معالجة التفاعل:', {
             error: error.message,
             stack: error.stack,
             type: interaction.type,
             customId: interaction.customId,
             userId: interaction.user?.id,
-            guildId: interaction.guild?.id
+            guildId: interaction.guild?.id,
+            errorType: errorInfo.isServiceUnavailable ? 'ServiceUnavailable' : 
+                      errorInfo.isRateLimited ? 'RateLimit' : 
+                      errorInfo.isInteractionError ? 'InteractionError' : 'Unknown'
         });
 
         try {
             const errorMessage = {
-                content: '❌ حدث خطأ غير متوقع. الرجاء المحاولة مرة أخرى لاحقاً.',
+                content: errorInfo.userMessage,
                 ephemeral: true
             };
 
-            if (interaction.deferred) {
-                await interaction.followUp(errorMessage);
-            } else if (!interaction.replied) {
-                await interaction.reply(errorMessage);
-            }
+            // استخدام دالة الرد الآمن مع إعادة المحاولة
+            await safeReply(interaction, interaction.reply, errorMessage);
         } catch (secondaryError) {
             logger.error('خطأ في إرسال رسالة الخطأ:', {
                 error: secondaryError.message,
@@ -782,10 +719,21 @@ async function checkTicketLimits(userId, guildId) {
 // دالة معالجة إنشاء التذكرة
 async function handleCreateTicket(interaction) {
     try {
+        // التحقق من صلاحية التفاعل قبل أي عملية
+        if (!interaction.isRepliable()) {
+            logger.warn('محاولة معالجة تفاعل غير صالح:', {
+                interactionId: interaction.id,
+                userId: interaction.user?.id,
+                guildId: interaction.guild?.id,
+                customId: interaction.customId
+            });
+            return;
+        }
+        
         // التحقق من حدود التذاكر
         const limits = await checkTicketLimits(interaction.user.id, interaction.guild.id);
         if (!limits.allowed) {
-            return await interaction.reply({
+            return await safeReply(interaction, interaction.reply, {
                 content: `❌ ${limits.reason}`,
                 ephemeral: true
             });
@@ -806,9 +754,30 @@ async function handleCreateTicket(interaction) {
         modal.addComponents(actionRow);
 
         // عرض الـ Modal للمستخدم
-        await interaction.showModal(modal);
+        try {
+            await interaction.showModal(modal);
+        } catch (modalError) {
+            // التحقق من نوع الخطأ
+            const errorInfo = processDiscordError(modalError);
+            logger.error('خطأ في عرض نموذج التذكرة:', {
+                error: modalError.message,
+                code: modalError.code,
+                isUnknownInteraction: errorInfo.isInteractionError
+            });
+            // لا نحاول الرد إذا كان الخطأ متعلق بالتفاعل
+            if (!errorInfo.isInteractionError) {
+                await safeReply(interaction, interaction.reply, {
+                    content: errorInfo.userMessage,
+                    ephemeral: true
+                });
+            }
+        }
     } catch (error) {
-        console.error('خطأ في إنشاء التذكرة:', error);
+        logger.error('خطأ في إنشاء التذكرة:', {
+            error: error.message,
+            code: error.code,
+            stack: error.stack
+        });
         await handleInteractionError(interaction, error); // استخدام دالة معالجة الأخطاء
     }
 }
@@ -955,11 +924,25 @@ async function handleCheckIn(interaction) {
         // وضع قفل للمستخدم
         attendanceLocks.set(userId, true);
         
-        // إرسال رد فوري للمستخدم
-        await interaction.reply({
-            content: '🔄 جاري تسجيل الحضور...',
-            ephemeral: true
-        });
+        // إرسال رد فوري للمستخدم مع معالجة أخطاء Discord API
+        try {
+            await retryDiscordOperation(async () => {
+                await interaction.reply({
+                    content: '🔄 جاري تسجيل الحضور...',
+                    ephemeral: true
+                });
+            }, 3, 1000);
+        } catch (replyError) {
+            logger.error('فشل في إرسال الرد الأولي للمستخدم:', {
+                error: replyError.message,
+                code: replyError.code,
+                userId: interaction.user.id,
+                guildId: interaction.guild.id
+            });
+            // إلغاء القفل وإعادة رمي الخطأ للمعالجة في الـ catch الخارجي
+            attendanceLocks.delete(userId);
+            throw replyError;
+        }
 
         // استخدام الدالة الجديدة للتحقق من السجلات
         const { attendanceRecord, leaveRecord } = await checkAttendanceAndLeave(userId, interaction.guild.id);
@@ -1027,7 +1010,7 @@ async function handleCheckIn(interaction) {
                         action: 'check-in'
                     });
                 } else {
-                    await retryOperation(async () => {
+                    await retryDiscordOperation(async () => {
                         await logChannel.send({
                             embeds: [{
                                 title: '✅ تسجيل حضور',
@@ -1069,7 +1052,7 @@ async function handleCheckIn(interaction) {
                 replyContent += `\n🎉 مبروك! لقد وصلت للمستوى ${pointsResult.level}`;
             };
 
-            await interaction.followUp({
+            await safeReply(interaction, interaction.followUp, {
                 content: replyContent,
                 ephemeral: true
             });
@@ -1079,7 +1062,7 @@ async function handleCheckIn(interaction) {
 
     } catch (error) {
         logger.error('Error in check-in:', error);
-        await interaction.followUp({
+        await safeReply(interaction, interaction.followUp, {
             content: '❌ حدث خطأ أثناء تسجيل الحضور',
             ephemeral: true
         });
@@ -1115,11 +1098,22 @@ function formatSessionDuration(checkIn, checkOut) {
 // تحديث دالة تسجيل الانصراف
 async function handleCheckOut(interaction) {
     try {
+        // التحقق من صلاحية التفاعل قبل أي عملية
+        if (!interaction.isRepliable()) {
+            logger.warn('محاولة معالجة تفاعل غير صالح:', {
+                interactionId: interaction.id,
+                userId: interaction.user?.id,
+                guildId: interaction.guild?.id,
+                customId: interaction.customId
+            });
+            return;
+        }
+        
         // التحقق من صلاحيات البوت قبل البدء بأي عملية
         const attendanceRole = interaction.guild.roles.cache.find(role => role.name === 'مسجل حضوره');
         if (attendanceRole && !interaction.guild.members.me.permissions.has('ManageRoles')) {
             logger.warn(`البوت لا يملك صلاحية إدارة الأدوار في سيرفر ${interaction.guild.name}`);
-            return await interaction.reply({
+            return await safeReply(interaction, interaction.reply, {
                 content: '❌ البوت لا يملك الصلاحيات الكافية لإضافة وإزالة رتبة "مسجل حضوره". الرجاء التواصل مع مسؤولي السيرفر لحل المشكلة.',
                 ephemeral: true
             });
@@ -1128,22 +1122,32 @@ async function handleCheckOut(interaction) {
         // تحقق من إمكانية تعديل الرتبة
         if (attendanceRole && !attendanceRole.editable) {
             logger.warn(`البوت لا يمكنه تعديل رتبة ${attendanceRole.name} في سيرفر ${interaction.guild.name}`);
-            return await interaction.reply({
+            return await safeReply(interaction, interaction.reply, {
                 content: '❌ البوت لا يمكنه تعديل رتبة "مسجل حضوره" بسبب تسلسل الرتب. الرجاء التواصل مع مسؤولي السيرفر لحل المشكلة.',
                 ephemeral: true
             });
         }
         
-        // إرسال رد فوري للمستخدم
-        await interaction.reply({
-            content: '🔄 جاري تسجيل الانصراف...',
-            ephemeral: true
-        });
+        // إرسال رد فوري للمستخدم مع معالجة أخطاء Discord API
+        try {
+            await safeReply(interaction, interaction.reply, {
+                content: '🔄 جاري تسجيل الانصراف...',
+                ephemeral: true
+            });
+        } catch (replyError) {
+            logger.error('فشل في إرسال الرد الأولي للمستخدم:', {
+                error: replyError.message,
+                code: replyError.code,
+                userId: interaction.user.id,
+                guildId: interaction.guild.id
+            });
+            throw replyError;
+        }
 
         const { attendanceRecord } = await checkAttendanceAndLeave(interaction.user.id, interaction.guild.id);
 
         if (!attendanceRecord || !attendanceRecord.sessions.length) {
-            return await interaction.followUp({
+            return await safeReply(interaction, interaction.followUp, {
                 content: '❌ لم يتم العثور على جلسة حضور مفتوحة',
                 ephemeral: true
             });
@@ -1151,7 +1155,7 @@ async function handleCheckOut(interaction) {
 
         const lastSession = attendanceRecord.sessions[attendanceRecord.sessions.length - 1];
         if (lastSession.checkOut) {
-            return await interaction.followUp({
+            return await safeReply(interaction, interaction.followUp, {
                 content: '❌ ليس لديك جلسة حضور مفتوحة',
                 ephemeral: true
             });
@@ -1235,7 +1239,7 @@ async function handleCheckOut(interaction) {
             }
         }
 
-        await interaction.followUp({
+        await safeReply(interaction, interaction.followUp, {
             embeds: [{
                 title: '✅ تم تسجيل انصرافك',
                 description: `مدة الجلسة: ${duration}`,
@@ -1247,7 +1251,7 @@ async function handleCheckOut(interaction) {
 
     } catch (error) {
         logger.error('Error in check-out:', error);
-        await interaction.followUp({
+        await safeReply(interaction, interaction.followUp, {
             content: '❌ حدث خطأ أثناء تسجيل الانصراف',
             ephemeral: true
         });

@@ -29,8 +29,9 @@ class TimeValidator {
         const hours = now.getHours();
         const minutes = now.getMinutes();
         
-        // Check if time is between 11:57 PM and 11:59 PM
-        return hours === 23 && (minutes >= 57 && minutes <= 59);
+        // Check if time is between 11:57 PM and 11:59:59 PM
+        // Make sure to return true for the entire restricted time range
+        return hours === 23 && minutes >= 57 && minutes <= 59;
     }
 }
 
